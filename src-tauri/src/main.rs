@@ -23,6 +23,10 @@ pub struct Property {
     pub id: String,
     pub addr: String,
     pub desc: String,
+    pub title: Option<String>,     
+    pub price: Option<String>,     
+    pub condition: Option<String>, 
+    pub location: Option<String>,
     pub source: String,
     pub color: String,
     pub status: String,
@@ -46,19 +50,23 @@ pub struct AppState {
 async fn get_all_properties(state: State<'_, AppState>) -> Result<Vec<Property>, String> {
     let conn = state.db.lock().unwrap();
     let mut stmt = conn
-        .prepare("SELECT id, addr, description, source, color, status, folder_path FROM properties")
+        .prepare("SELECT id, addr, description, source, color, status, folder_path, title, price, condition, location FROM properties")
         .map_err(|e| e.to_string())?;
 
-    let prop_iter = stmt
+let prop_iter = stmt
         .query_map([], |row| {
             Ok(Property {
-                id: row.get::<_, i64>(0)?.to_string(), // 数据库存 INTEGER，转回 String 给前端
+                id: row.get::<_, i64>(0)?.to_string(),
                 addr: row.get(1)?,
                 desc: row.get(2)?,
                 source: row.get(3)?,
                 color: row.get(4)?,
                 status: row.get(5)?,
                 folder_path: row.get(6)?,
+                title: row.get(7)?,      // 👈 新增读取
+                price: row.get(8)?,      // 👈 新增读取
+                condition: row.get(9)?,  // 👈 新增读取
+                location: row.get(10)?,  // 👈 新增读取
             })
         })
         .map_err(|e| e.to_string())?;
@@ -73,13 +81,24 @@ async fn get_all_properties(state: State<'_, AppState>) -> Result<Vec<Property>,
 #[tauri::command]
 async fn save_property_update(
     id: String,
+    title: String,       
+    price: String,       
+    condition: String,   
+    location: String,
     new_desc: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let conn = state.db.lock().unwrap();
-    conn.execute(
-        "UPDATE properties SET description = ?1, status = 'processed' WHERE id = ?2",
-        (&new_desc, &id),
+conn.execute(
+        "UPDATE properties SET 
+            title = ?1, 
+            price = ?2, 
+            condition = ?3, 
+            location = ?4, 
+            description = ?5, 
+            status = 'processed' 
+        WHERE id = ?6",
+        (&title, &price, &condition, &location, &new_desc, &id),
     )
     .map_err(|e| e.to_string())?;
 
@@ -93,33 +112,122 @@ async fn archive_property(id: String, state: State<'_, AppState>) -> Result<(), 
     conn.execute("DELETE FROM properties WHERE id = ?1", [&id])
         .map_err(|e| e.to_string())?;
     }
-    let folder_path = format!("{}/{}",*DOWNLOAD_DIR,id);
-    std::fs::remove_dir(folder_path).map_err(|e| e.to_string())?;
+// 2. 删除本地对应的图片文件夹
+    let folder_path = format!("{}/{}", *DOWNLOAD_DIR, id);
+    let path = Path::new(&folder_path);
+    
+    // 如果文件夹存在，就执行连根拔起 (remove_dir_all)
+    if path.exists() {
+        std::fs::remove_dir_all(path).map_err(|e| format!("删除文件夹失败: {}", e))?;
+    }
     Ok(())
 }
 
 #[tauri::command]
 async fn get_first_image(folder_path: String) -> Result<String, String> {
-    // 1. 检查文件夹是否存在
     let path = Path::new(&folder_path);
-    if !path.exists() || !path.is_dir() {
+    
+    // 检查 1：路径存在吗？
+    if !path.exists() {
+
         return Err("Folder not found".into());
     }
+    
+    // 检查 2：是文件夹吗？
+    if !path.is_dir() {
 
-    // 2. 扫描文件夹里的第一个文件
-    let entries = std::fs::read_dir(path).map_err(|e| e.to_string())?;
+        return Err("Not a directory".into());
+    }
+
+    // 检查 3：获取绝对路径成功了吗？
+    let abs_path = std::fs::canonicalize(path).map_err(|e| {
+
+        e.to_string()
+    })?;
+
+    let entries = std::fs::read_dir(&abs_path).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
         let file_path = entry.path();
-        // 简单判断一下后缀名
         if let Some(ext) = file_path.extension() {
             let ext_str = ext.to_string_lossy().to_lowercase();
             if ext_str == "jpg" || ext_str == "jpeg" || ext_str == "png" {
-                // 返回绝对路径给前端
-                return Ok(file_path.to_string_lossy().into_owned());
+                
+                let mut path_str = file_path.to_string_lossy().into_owned();
+                if path_str.starts_with("\\\\?\\") {
+                    path_str = path_str.replace("\\\\?\\", "");
+                }
+                
+                return Ok(path_str);
             }
         }
     }
+    
+    println!("⚠️ [Rust] 文件夹里没有找到任何 jpg/png 图片！");
     Err("No image found".into())
+}
+
+#[tauri::command]
+async fn get_all_images(folder_path: String) -> Result<Vec<String>, String> {
+    let path = std::path::Path::new(&folder_path);
+    if !path.exists() || !path.is_dir() {
+        return Ok(vec![]); // 文件夹不存在就返回空列表
+    }
+
+    let abs_path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let mut images = Vec::new(); // 准备一个空列表装图片
+
+    let entries = std::fs::read_dir(&abs_path).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let file_path = entry.path();
+        if let Some(ext) = file_path.extension() {
+            let ext_str = ext.to_string_lossy().to_lowercase();
+            // 只抓图片
+            if ext_str == "jpg" || ext_str == "jpeg" || ext_str == "png" || ext_str == "webp" {
+                let mut path_str = file_path.to_string_lossy().into_owned();
+                if path_str.starts_with("\\\\?\\") {
+                    path_str = path_str.replace("\\\\?\\", "");
+                }
+                images.push(path_str); // 存入列表
+            }
+        }
+    }
+    
+    Ok(images)
+}
+
+#[tauri::command]
+async fn save_photo_order(ordered_paths: Vec<String>, deleted_paths: Vec<String>) -> Result<String, String> {
+    
+    // ✨ 1. 先把死亡名单里的照片彻底物理删除！
+    for path_str in &deleted_paths {
+        let path = std::path::Path::new(path_str);
+        if path.exists() {
+            // std::fs::remove_file 会直接从电脑硬盘里删掉这个文件
+            let _ = std::fs::remove_file(path); 
+        }
+    }
+
+    // 2. 然后再把剩下的照片安全重命名为 .tmp 临时文件
+    let mut temp_files = Vec::new();
+    for path_str in &ordered_paths {
+        let path = std::path::Path::new(path_str);
+        if path.exists() {
+            let temp_path = path.with_extension("tmp");
+            std::fs::rename(path, &temp_path).map_err(|e| e.to_string())?;
+            let ext = path.extension().unwrap_or_default().to_owned();
+            temp_files.push((temp_path, ext));
+        }
+    }
+
+    // 3. 最后再把临时文件按顺序命名为 01.jpg, 02.jpg...
+    for (i, (temp_path, ext)) in temp_files.iter().enumerate() {
+        let dir = temp_path.parent().unwrap();
+        let new_name = format!("{:02}.{}", i + 1, ext.to_string_lossy());
+        let final_path = dir.join(new_name);
+        std::fs::rename(temp_path, final_path).map_err(|e| e.to_string())?;
+    }
+
+    Ok("Photos sorted, renamed, and deleted successfully".to_string())
 }
 
 // ==========================================
@@ -151,7 +259,9 @@ async fn main() {
             get_all_properties,
             save_property_update,
             archive_property,
-            get_first_image
+            get_first_image,
+            get_all_images,
+            save_photo_order
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

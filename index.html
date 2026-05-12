@@ -9,9 +9,9 @@
   <link rel="stylesheet" href="/src/styles.css" />
 </head>
 <body>
-<div class="app">
 
-  <!-- ── Header ── -->
+<div id="main-view" class="app">
+
   <div class="header">
     <span class="app-title">PropBot</span>
     <div class="tabs">
@@ -23,7 +23,6 @@
       </div>
     </div>
     <div class="header-right">
-      <!-- bot-dot gets class "offline" when bot is not running -->
       <div class="bot-pill">
         <div class="bot-dot" id="bot-dot"></div>
         <span id="bot-status-label">Connecting…</span>
@@ -31,7 +30,6 @@
     </div>
   </div>
 
-  <!-- ── Main grid area ── -->
   <div class="main">
     <div class="toolbar">
       <span class="toolbar-label" id="toolbar-label">Loading…</span>
@@ -40,12 +38,10 @@
         <i class="ti ti-search" aria-hidden="true"></i>
         <input type="text" id="search-input" placeholder="Search…" />
       </div>
-      <!-- EXTEND: filter / sort buttons go here -->
       <div class="icon-btn" title="Filter"><i class="ti ti-filter" aria-hidden="true"></i></div>
       <div class="icon-btn" title="Sort"><i class="ti ti-arrows-sort" aria-hidden="true"></i></div>
     </div>
 
-    <!-- Cards injected by main.ts renderCards() -->
     <div class="card-grid" id="card-grid">
       <div class="grid-empty" id="grid-empty">
         <i class="ti ti-inbox"></i>
@@ -53,11 +49,9 @@
       </div>
     </div>
 
-    <!-- Action bar — visible only when ≥1 card selected -->
-    <div class="action-bar" id="action-bar">
+    <div class="action-bar" id="action-bar" style="display: none;">
       <span class="action-label" id="sel-label">0 selected</span>
       <div class="action-spacer"></div>
-      <!-- EXTEND: bulk actions (tag, archive, export) go here -->
       <button class="btn" id="clear-btn">
         <i class="ti ti-x" aria-hidden="true"></i> Clear
       </button>
@@ -67,7 +61,6 @@
     </div>
   </div>
 
-  <!-- ── Detail panel ── -->
   <div class="detail">
     <div class="detail-header">
       <i class="ti ti-home" aria-hidden="true"></i>
@@ -79,7 +72,6 @@
       <span>Select a property</span>
     </div>
 
-    <!-- EXTEND: add fields (price, sqft, type) inside detail-body when ready -->
     <div class="detail-filled hidden" id="detail-filled">
       <div class="detail-thumb" id="detail-thumb">
         <i class="ti ti-building" aria-hidden="true"></i>
@@ -88,6 +80,10 @@
         <div class="field">
           <div class="field-label">Address</div>
           <div class="field-value" id="d-addr">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Folder ID</div>
+          <div class="field-value" id="d-id">—</div>
         </div>
         <div class="field">
           <div class="field-label">Source channel</div>
@@ -101,10 +97,8 @@
           <div class="field-label">Description (from Telegram)</div>
           <textarea class="desc-box" id="d-desc" rows="5"></textarea>
         </div>
-        <!-- EXTEND: more fields here -->
       </div>
       <div class="detail-footer">
-        <!-- EXTEND: per-property actions -->
         <button class="btn" id="archive-btn">
           <i class="ti ti-archive" aria-hidden="true"></i> Archive
         </button>
@@ -114,8 +108,63 @@
       </div>
     </div>
   </div>
-
 </div>
+
+<div id="process-view" class="app hidden" style="position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 999; background: #fff;">
+  
+  <div class="process-header" style="grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; padding: 10px 20px; border-bottom: 1px solid var(--border-md);">
+    <div style="display: flex; align-items: center; gap: 15px;">
+      <button id="back-to-list-btn" class="back-btn" style="border:none; background:transparent; cursor:pointer; font-size:14px; display:flex; align-items:center; gap:5px;"><i class="ti ti-arrow-left"></i> Back</button>
+      <div class="title" id="process-title" style="font-weight: 600; font-size: 16px;">Processing Property</div>
+    </div>
+    <div class="status-indicator" id="process-progress" style="font-size: 14px; color: var(--text-2);">1 of 3</div>
+  </div>
+
+  <div class="main-content“ style="padding: 20px; overflow-y: auto;">
+    <div class="photo-grid" id="process-photo-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px;">
+      </div>
+  </div>
+
+  <div class="sidebar" style="border-left: 1px solid var(--border-md); display: flex; flex-direction: column;">
+    <div class="sidebar-content" style="padding: 20px; flex: 1; display: flex; flex-direction: column; gap: 15px;">
+      <div class="ai-toolbar">
+    <button id="ai-enhance-btn" class="btn"><i class="ti ti-sparkles"></i> AI Enhance</button>
+    <button id="ai-extract-btn" class="btn"><i class="ti ti-language"></i> AI Extract Data</button>
+  </div>
+
+  <div class="input-group">
+    <label class="input-label">Title</label>
+    <input type="text" id="process-title-input" class="styled-input" placeholder="e.g. Luxurious 3-Storey Villa">
+  </div>
+
+  <div class="input-group">
+    <label class="input-label">Price</label>
+    <input type="text" id="process-price-input" class="styled-input" placeholder="e.g. RM 1.2M">
+  </div>
+
+  <div class="input-group">
+    <label class="input-label">Condition</label>
+    <input type="text" id="process-condition-input" class="styled-input" placeholder="e.g. Fully Furnished">
+  </div>
+
+  <div class="input-group">
+    <label class="input-label">Location</label>
+    <input type="text" id="process-location-input" class="styled-input" placeholder="e.g. Ipoh">
+  </div>
+
+  <div class="input-group desc-group">
+    <label class="input-label">Detailed Description</label>
+    <textarea id="process-desc-editor" class="text-editor"></textarea>
+  </div>
+    </div>
+    <div class="sidebar-footer" style="padding: 20px; border-top: 1px solid var(--border-md); display: flex; gap: 10px;">
+      <button id="process-skip-btn" class="btn" style="flex: 1;">Skip</button>
+      <button id="process-save-btn" class="btn primary" style="flex: 2; justify-content: center;">Save & Next</button>
+    </div>
+  </div>
+  
+</div>
+
 <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

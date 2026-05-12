@@ -16,7 +16,11 @@ pub fn bootstrap() -> Result<(Connection, i64), Box<dyn std::error::Error>> {
             source TEXT,
             color TEXT,
             status TEXT,
-            folder_path TEXT
+            folder_path TEXT,
+            title TEXT,       
+            price TEXT,       
+            condition TEXT,   
+            location TEXT    
         )",
         [],
     )?;

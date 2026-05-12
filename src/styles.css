@@ -487,3 +487,240 @@ button.primary:hover, .btn.primary:hover { opacity: 0.82; background: var(--text
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-md); border-radius: 10px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+/* =============================================================
+   Process View 专属样式 (全屏覆盖界面)
+   ============================================================= */
+#process-view {
+  position: fixed; 
+  top: 0; 
+  left: 0; 
+  width: 100vw; 
+  height: 100vh; 
+  z-index: 999; 
+  background: var(--bg);
+}
+
+#process-view .process-header {
+  grid-column: 1 / -1; 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center; 
+  padding: 10px 20px; 
+  border-bottom: 1px solid var(--border-md);
+}
+
+#process-view .process-header-left {
+  display: flex; 
+  align-items: center; 
+  gap: 15px;
+}
+
+#process-view .back-btn {
+  border: none; 
+  background: transparent; 
+  cursor: pointer; 
+  font-size: 14px; 
+  display: flex; 
+  align-items: center; 
+  gap: 5px;
+}
+
+#process-view .title {
+  font-weight: 600; 
+  font-size: 16px;
+}
+
+#process-view .status-indicator {
+  font-size: 14px; 
+  color: var(--text-2);
+}
+
+#process-view .main-content {
+  padding: 20px; 
+  overflow-y: auto;
+}
+
+#process-view .photo-grid {
+  display: grid; 
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); 
+  gap: 15px;
+}
+
+#process-view .sidebar {
+  border-left: 1px solid var(--border-md); 
+  display: flex; 
+  flex-direction: column;
+}
+
+#process-view .tabs {
+  padding: 10px 20px; 
+  border-bottom: 1px solid var(--border-md);
+}
+
+#process-view .sidebar-content {
+  padding: 20px;
+  flex: 1; 
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  height: 100%; /* 占满高度 */
+  overflow: hidden; /* 防止出现双滚动条 */
+}
+
+#process-view .ai-toolbar {
+  display: flex; 
+  gap: 10px; 
+  margin-bottom: 5px;
+}
+
+#process-view .ai-toolbar .btn {
+  flex: 1;
+}
+
+#process-view .input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0; /* 固定的输入框不要被压缩 */
+}
+
+#process-view .input-label{
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+#process-view .styled-input, 
+#process-view .text-editor {
+  width: 100%;
+  padding: 10px 14px; 
+  font-size: 14px;
+  font-family: var(--font);
+  color: var(--text);
+  background-color: var(--bg);
+  border: 1px solid var(--border-md);
+  border-radius: 8px; 
+  outline: none;
+  transition: all 0.2s ease; 
+}
+
+/* 核心：让 Description 组自动扩展 */
+#process-view .desc-group {
+  flex: 1; /* 重点：它会占据剩下的所有垂直空间 */
+  display: flex;
+  flex-direction: column;
+  min-height: 200px; /* 给一个最小高度 */
+}
+/* 占位符颜色变淡 */
+#process-view .styled-input::placeholder, 
+#process-view .text-editor::placeholder {
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+/* 5. 聚焦时的发光效果 (点睛之笔) */
+#process-view .styled-input:focus, 
+#process-view .text-editor:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2); 
+  background-color: #fff;
+}
+
+#process-view .text-editor {
+  flex: 1; 
+  width: 100%;
+  padding: 12px;
+  font-size: 14px;
+  border: 1px solid var(--border-md);
+  border-radius: 8px;
+  outline: none;
+  resize: none; /* 既然它已经占满了，就不需要手动调大小了 */
+  line-height: 1.6;
+}
+
+#process-view .sidebar-footer {
+  padding: 20px; 
+  border-top: 1px solid var(--border-md); 
+  display: flex; 
+  gap: 10px;
+}
+
+#process-view #process-skip-btn {
+  flex: 1;
+}
+
+#process-view #process-save-btn {
+  flex: 2; 
+  justify-content: center;
+}
+
+#process-view .styled-input {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-md);
+  background: var(--bg);
+}
+/* --- 1. 照片墙高级样式 --- */
+#process-view .photo-item {
+  position: relative;
+  cursor: grab;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-subtle);
+  aspect-ratio: 4 / 3; 
+  border: 1px solid transparent;
+
+  /* ✨ 终极必杀 2：禁止里面的文字（数字序号）被鼠标选中！ */
+  user-select: none; 
+  -webkit-user-select: none;
+}
+
+#process-view .photo-item.dragging { opacity: 0.5; border: 2px dashed #aaa; }
+#process-view .photo-item.drag-over { transform: scale(1.03); border: 2px solid var(--border-focus); transition: all 0.2s; }
+
+/* 左上角：高级深灰数字圈 */
+#process-view .number-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: #222; /* 深灰色 */
+  color: #fff;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  z-index: 10;
+}
+
+/* 右上角：纯净白底删除叉叉 */
+#process-view .delete-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: #fff; /* 纯白色底 */
+  color: #333;      /* 深灰色叉叉图标 */
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  cursor: pointer;
+  z-index: 10;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1); 
+  border: 1px solid #eee;
+  transition: all 0.2s;
+}
+
+#process-view .delete-btn:hover {
+  color: #e74c3c; /* 鼠标放上去时变成红色警示 */
+  border-color: #e74c3c;
+}

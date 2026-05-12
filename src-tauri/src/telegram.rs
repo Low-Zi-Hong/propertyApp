@@ -116,6 +116,10 @@ pub fn spawn_telegram_task(app_handle: AppHandle,last_id:i64) {
                                         source: "TG Bot".to_string(),
                                         color: "c1".to_string(),
                                         status: "new".to_string(),
+                                        condition: Some("".to_string()),
+                                        location: Some("".to_string()),
+                                        price: Some("".to_string()),
+                                        title: Some("".to_string()),
                                         folder_path: format!(
                                             "{}/{}",
                                             *DOWNLOAD_DIR, active_folder_id
@@ -164,6 +168,7 @@ pub fn spawn_telegram_task(app_handle: AppHandle,last_id:i64) {
                                                 "jpg",
                                             )
                                             .await;
+                                            let _ = app_handle.emit("update-card",file_id);
                                             file_counter += 1;
                                         }
                                     }
