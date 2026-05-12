@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Property Bot Manager</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Header ── -->
+  <div class="header">
+    <span class="app-title">PropBot</span>
+    <div class="tabs">
+      <div class="tab active" data-tab="new">
+        New <span class="tab-count" id="new-count">0</span>
+      </div>
+      <div class="tab" data-tab="all">
+        All properties <span class="tab-count" id="all-count">0</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <!-- bot-dot gets class "offline" when bot is not running -->
+      <div class="bot-pill">
+        <div class="bot-dot" id="bot-dot"></div>
+        <span id="bot-status-label">Connecting…</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Main grid area ── -->
+  <div class="main">
+    <div class="toolbar">
+      <span class="toolbar-label" id="toolbar-label">Loading…</span>
+      <div class="toolbar-spacer"></div>
+      <div class="search-box">
+        <i class="ti ti-search" aria-hidden="true"></i>
+        <input type="text" id="search-input" placeholder="Search…" />
+      </div>
+      <!-- EXTEND: filter / sort buttons go here -->
+      <div class="icon-btn" title="Filter"><i class="ti ti-filter" aria-hidden="true"></i></div>
+      <div class="icon-btn" title="Sort"><i class="ti ti-arrows-sort" aria-hidden="true"></i></div>
+    </div>
+
+    <!-- Cards injected by main.ts renderCards() -->
+    <div class="card-grid" id="card-grid">
+      <div class="grid-empty" id="grid-empty">
+        <i class="ti ti-inbox"></i>
+        <span>No properties yet</span>
+      </div>
+    </div>
+
+    <!-- Action bar — visible only when ≥1 card selected -->
+    <div class="action-bar" id="action-bar">
+      <span class="action-label" id="sel-label">0 selected</span>
+      <div class="action-spacer"></div>
+      <!-- EXTEND: bulk actions (tag, archive, export) go here -->
+      <button class="btn" id="clear-btn">
+        <i class="ti ti-x" aria-hidden="true"></i> Clear
+      </button>
+      <button class="btn primary" id="process-btn">
+        <i class="ti ti-arrow-right" aria-hidden="true"></i> Process selected
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Detail panel ── -->
+  <div class="detail">
+    <div class="detail-header">
+      <i class="ti ti-home" aria-hidden="true"></i>
+      Property details
+    </div>
+
+    <div class="detail-empty" id="detail-empty">
+      <i class="ti ti-hand-click" aria-hidden="true"></i>
+      <span>Select a property</span>
+    </div>
+
+    <!-- EXTEND: add fields (price, sqft, type) inside detail-body when ready -->
+    <div class="detail-filled hidden" id="detail-filled">
+      <div class="detail-thumb" id="detail-thumb">
+        <i class="ti ti-building" aria-hidden="true"></i>
+      </div>
+      <div class="detail-body">
+        <div class="field">
+          <div class="field-label">Address</div>
+          <div class="field-value" id="d-addr">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Source channel</div>
+          <div class="field-value" id="d-source">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Received</div>
+          <div class="field-value" id="d-time">—</div>
+        </div>
+        <div class="field">
+          <div class="field-label">Description (from Telegram)</div>
+          <textarea class="desc-box" id="d-desc" rows="5"></textarea>
+        </div>
+        <!-- EXTEND: more fields here -->
+      </div>
+      <div class="detail-footer">
+        <!-- EXTEND: per-property actions -->
+        <button class="btn" id="archive-btn">
+          <i class="ti ti-archive" aria-hidden="true"></i> Archive
+        </button>
+        <button class="btn primary" id="single-process-btn">
+          <i class="ti ti-arrow-right" aria-hidden="true"></i> Process
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
