@@ -14,6 +14,8 @@ use std::path::Path;
 
 mod database;
 mod telegram;
+mod llmEnhance;
+mod watermark;
 
 // ==========================================
 // 1. 数据模型 (加上反序列化重命名，解决命名规范问题)
@@ -239,6 +241,11 @@ pub static BOT_TOKEN: LazyLock<String> =
 pub static DOWNLOAD_DIR: LazyLock<String> =
     LazyLock::new(|| env::var("FOLDER_PATH").expect("FOLDER_PATH must be set"));
 
+pub static DEEPSEEK_TOKEN: LazyLock<String> =
+    LazyLock::new(|| env::var("DEEPSEEK_API_KEY").expect("FOLDER_PATH must be set"));
+
+pub const WATERMARKTEXT: &str = "Canny Chong\n016-5583820";
+
 // ==========================================
 // 5. 运行入口
 // ==========================================
@@ -261,7 +268,9 @@ async fn main() {
             archive_property,
             get_first_image,
             get_all_images,
-            save_photo_order
+            save_photo_order,
+            llmEnhance::enhance_text,
+            watermark::add_watermark
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

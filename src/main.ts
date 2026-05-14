@@ -77,7 +77,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const processConditionInput = document.getElementById('process-condition-input') as HTMLInputElement;
   const processLocationInput = document.getElementById('process-location-input') as HTMLInputElement;
 
-  const processtabDescEditor = document.getElementById('process-desc-editor') as HTMLTextAreaElement;
+  const processSaveBtn = document.getElementById('process-save-btn') as HTMLButtonElement;
+  const processSkipBtn = document.getElementById('process-skip-btn') as HTMLButtonElement;
 
   // Bot 状态
   const botStatusLabel = document.getElementById('bot-status-label') as HTMLElement;
@@ -338,8 +339,13 @@ async function loadPropertyIntoProcessView(id: string) {
 
   processTitle.textContent = prop.addr || `Property ${id}`;
   processProgress.textContent = `${currentIndex + 1} of ${processQueue.length}`;
-  processDescEditor.value = prop.desc; // 填入真实的描述
+  processDescEditor.value = prop.desc || ""; // 填入真实的描述
   processPhotoGrid.innerHTML = 'Loading images...';
+
+  processTitleInput.value = prop.title || "";
+  processLocationInput.value = prop.location || "";
+  processConditionInput.value = prop.condition || "";
+  processPriceInput.value = prop.price || "";
 
   try {
     // 呼叫上一轮我们写好的 Rust 接口，拿到所有图片！
@@ -411,9 +417,142 @@ async function loadPropertyIntoProcessView(id: string) {
     });
   }
 
+  let aiEnhanceBtn = document.getElementById('ai-enhance-btn') as HTMLButtonElement;
+
+  aiEnhanceBtn?.addEventListener('click', async() => {
+    const originalText = processDescEditor.value;
+    if (!originalText.trim()) {
+      alert("Please enter some description first!");
+      return;
+    }
+
+    const trackingId = processQueue[currentIndex];
+
+    aiEnhanceBtn.disabled = true;
+    processLocationInput.disabled = true;
+    processConditionInput.disabled = true;
+    processPriceInput.disabled = true;
+    processTitleInput.disabled = true;
+    processSaveBtn.disabled = true;
+    processSkipBtn.disabled = true;
+    const originalHTML = aiEnhanceBtn.innerHTML; // 记住原来的图标和文字（带小星星的那个）
+    aiEnhanceBtn.innerHTML = '<i class="ti ti-loader"></i> Enhancing...'; // 换成加载中的提示
+
+    // 3. 开始执行你的 Todo Invoke
+    try {
+      // 向 Rust 发送命令，假设我们在 Rust 里管这个函数叫 'enhance_text'
+      const rawAiResponse = await invoke<string>('enhance_text', { rawText: originalText });
+      
+      if (processQueue[currentIndex] !== trackingId || processView.classList.contains('hidden')) {
+          console.log("👻 发现幽灵数据！用户已切换房源，丢弃本次 AI 结果。");
+          return; // 直接干掉它，不准往下执行填表！
+      }
+
+// 2. 清理字符串（防御性编程）：有时候 AI 还是会手贱加上 ```json ... ```，我们把它过滤掉
+      const cleanJsonStr = rawAiResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+      
+      // 3. 把字符串转换成真正的 JavaScript 对象
+      const aiData = JSON.parse(cleanJsonStr);
+
+      // 检查 Title
+      if (!processTitleInput.value.trim() && aiData.title) {
+        processTitleInput.value = aiData.title;
+      }
+      
+      // 检查 Price
+      if (!processPriceInput.value.trim() && aiData.price) {
+        processPriceInput.value = aiData.price;
+      }
+      
+      // 检查 Condition
+      if (!processConditionInput.value.trim() && aiData.condition) {
+        processConditionInput.value = aiData.condition;
+      }
+      
+      // 检查 Location
+      if (!processLocationInput.value.trim() && aiData.location) {
+        processLocationInput.value = aiData.location;
+      }
+
+      // 描述通常是我们明确想要润色的核心，所以这里我们直接替换（如果你想保留旧的，也可以像上面那样写 if）
+      if (aiData.description) {
+        processDescEditor.value = aiData.description;
+      }
+
+    } catch (error) {
+      console.error("AI 处理失败或 JSON 解析错误:", error);
+      alert("Failed to extract data. The AI output might not be in correct format.");
+    } finally {
+      aiEnhanceBtn.disabled = false;
+      processLocationInput.disabled = false;
+      processConditionInput.disabled = false;
+      processPriceInput.disabled = false;
+      processTitleInput.disabled = false;
+      processSaveBtn.disabled = false;
+      processSkipBtn.disabled = false;
+      aiEnhanceBtn.innerHTML = originalHTML;
+    }
+  });
+const processWatermarkBtn = document.getElementById('add-watermark-btn') as HTMLButtonElement;
+
+  processWatermarkBtn?.addEventListener('click', async () => {
+    // 1. 抓取当前网格里“活着的”照片路径（被叉掉的就不管了）
+    const photoItems = document.querySelectorAll('#process-photo-grid .photo-item');
+    // 把它们变成一个装满路径的 Array (列表)
+    const paths = Array.from(photoItems).map(item => (item as HTMLElement).dataset.path);
+
+    if (paths.length === 0) {
+      alert("No images to watermark!");
+      return;
+    }
+
+    // 2. 按钮彻底上锁
+    processWatermarkBtn.disabled = true;
+    const originalText = processWatermarkBtn.innerHTML;
+    processWatermarkBtn.innerHTML = '<i class="ti ti-loader"></i> Processing...';
+
+    // ✨ 这里先写死你的名字，以后可以从 Settings 页面读取
+    const dynamicWatermarkText = "Canny Chong\n016-5583820"; 
+
+    try {
+      // 3. 呼叫 Rust 时，把整个 Array (paths) 和文字 一次性传过去！
+      const resultMsg = await invoke<string>('add_watermark', { 
+        imagePaths: paths,
+        watermarkText: dynamicWatermarkText 
+      });
+      
+      const timestamp = new Date().getTime();
+
+      photoItems.forEach(item => {
+        const imgEl = item.querySelector('img') as HTMLImageElement;
+        if (imgEl) {
+           // 利用 URL 对象来清理和追加时间戳，骗过浏览器让它重新去硬盘读取
+           const url = new URL(imgEl.src);
+           url.searchParams.set('t', timestamp.toString()); // 变成类似 http://...?t=123456789
+           imgEl.src = url.toString();
+        }
+      });
+      
+      console.log(resultMsg);
+      // 4. 10 张图全盖完章了，只弹一次提示！
+      alert("✅ Watermark added successfully!");
+      
+    } catch (error) {
+      console.error("加水印失败:", error);
+      alert("Failed to add watermark. " + error);
+    } finally {
+      // 5. 解锁按钮
+      processWatermarkBtn.disabled = false;
+      processWatermarkBtn.innerHTML = originalText;
+    }
+  });
+
   // 5. 下一步与退出逻辑
-  document.getElementById('process-save-btn')?.addEventListener('click', async () => {
+  processSaveBtn?.addEventListener('click', async () => {
     // TODO: 这里可以调用 invoke('save_property_update') 讲修改后的文本存进数据库
+  processSaveBtn.disabled = true;
+  const originalText = processSaveBtn.innerHTML;
+  processSaveBtn.innerHTML = '<i class="ti ti-loader"></i> Saving...';
   const currentId = processQueue[currentIndex];
   const prop = appState.properties.get(currentId);
 
@@ -459,10 +598,23 @@ id: currentId,
     } else {
       alert("🎉 All selected properties are processed!");
       closeProcessView();
+
+      processSaveBtn.disabled = false;
+      processSaveBtn.innerHTML = originalText;
     }
   });
 
   document.getElementById('back-to-list-btn')?.addEventListener('click', closeProcessView);
+
+  processSkipBtn?.addEventListener('click', () => {
+    currentIndex++;
+    if (currentIndex < processQueue.length) {
+      loadPropertyIntoProcessView(processQueue[currentIndex]); // 直接加载下一个，不保存
+    } else {
+      alert("🎉 All selected properties are processed!");
+      closeProcessView();
+    }
+  });
 
   function closeProcessView() {
     processView.classList.add('hidden');
