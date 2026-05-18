@@ -1,0 +1,537 @@
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import Sortable from 'sortablejs';
+import { PropertyData, appState, globalVars } from './state';
+
+let sortableInstance: Sortable | null = null;
+let deletedPhotosQueue: string[] = [];
+
+let mainView:HTMLElement;
+let processView: HTMLElement;
+let processSaveBtn: HTMLButtonElement;
+let processTitleInput: HTMLInputElement;
+let processPhotoGrid: HTMLElement;
+let processSkipBtn: HTMLButtonElement;
+let processLocationInput:HTMLInputElement;
+let processConditionInput:HTMLInputElement;
+let processPriceInput:HTMLInputElement;
+let processDescEditor:HTMLTextAreaElement;
+let cardGrid:HTMLElement;
+let processProgress:HTMLElement;
+let processTitle:HTMLElement;
+let gridEmpty:HTMLElement;
+let newCountLabel:HTMLElement;
+let allCountLabel:HTMLElement;
+let toolbarLabel:HTMLElement;
+let detailEmpty:HTMLElement;
+let actionBar:HTMLElement;
+let selLabel:HTMLElement;
+let detailFilled:HTMLElement;
+let detailThumb:HTMLElement;
+let dAddr:HTMLElement;
+let dSource:HTMLElement;
+let dTime:HTMLElement;
+let dDesc:HTMLTextAreaElement;
+let did:HTMLElement;
+
+export function initProcessView() {
+mainView                = document.getElementById('main-view') as HTMLElement;
+processView             = document.getElementById('process-view') as HTMLElement;
+processSaveBtn          = document.getElementById('process-save-btn') as HTMLButtonElement;
+processSkipBtn          = document.getElementById('process-skip-btn') as HTMLButtonElement;
+processTitleInput       = document.getElementById('process-title-input') as HTMLInputElement;
+processPhotoGrid        = document.getElementById('process-photo-grid') as HTMLElement;
+processLocationInput    = document.getElementById('process-location-input') as HTMLInputElement;
+processConditionInput   = document.getElementById('process-condition-input') as HTMLInputElement;
+processPriceInput       = document.getElementById('process-price-input') as HTMLInputElement;
+processDescEditor       = document.getElementById('process-desc-editor') as HTMLTextAreaElement;
+cardGrid                = document.getElementById('card-grid') as HTMLElement;
+processProgress         = document.getElementById('process-progress') as HTMLElement;
+processTitle            = document.getElementById('process-title') as HTMLElement;
+gridEmpty               = document.getElementById('grid-empty') as HTMLElement;
+newCountLabel           = document.getElementById('new-count') as HTMLElement;
+allCountLabel           = document.getElementById('all-count') as HTMLElement;
+toolbarLabel            = document.getElementById('toolbar-label') as HTMLElement;
+detailEmpty             = document.getElementById('detail-empty') as HTMLElement;
+actionBar               = document.getElementById('action-bar') as HTMLElement;
+selLabel                = document.getElementById('sel-label') as HTMLElement;
+detailFilled            = document.getElementById('detail-filled') as HTMLElement;
+detailThumb             = document.getElementById('detail-thumb') as HTMLElement;
+dAddr                   = document.getElementById('d-addr') as HTMLElement;
+dSource                 = document.getElementById('d-source') as HTMLElement;
+dTime                   = document.getElementById('d-time') as HTMLElement;
+dDesc                   = document.getElementById('d-desc') as HTMLTextAreaElement;
+did                     = document.getElementById('d-id') as HTMLElement;
+
+ document.getElementById('process-btn')?.addEventListener('click', () => {
+    globalVars.processQueue = Array.from(appState.selectedIds);
+    if (globalVars.processQueue.length === 0) {
+      alert("请至少选择一个房源进行处理！");
+      return;
+    }
+    
+    globalVars.currentIndex = 0;
+    // 隐藏主界面，显示处理界面
+    mainView?.classList.add('hidden');
+    processView?.classList.remove('hidden');
+    
+    loadPropertyIntoProcessView(globalVars.processQueue[globalVars.currentIndex]);
+  });
+
+  document.getElementById('single-process-btn')?.addEventListener('click', () => {
+        // 隐藏主界面，显示处理界面
+    globalVars.processQueue = [appState.currentDetailId!];
+    globalVars.currentIndex = 0;
+    
+    mainView?.classList.add('hidden');
+    processView?.classList.remove('hidden');
+    
+    loadPropertyIntoProcessView(globalVars.processQueue[globalVars.currentIndex]);
+  });
+
+
+  // 4. 渲染极简丝滑版照片墙
+ // 4. 渲染极简丝滑版照片墙
+
+  // 辅助更新号码 (保持不变)
+
+
+  let aiEnhanceBtn = document.getElementById('ai-enhance-btn') as HTMLButtonElement;
+
+  aiEnhanceBtn?.addEventListener('click', async() => {
+    const originalText = processDescEditor.value;
+    if (!originalText.trim()) {
+      alert("Please enter some description first!");
+      return;
+    }
+
+    const trackingId = globalVars.processQueue[globalVars.currentIndex];
+
+    aiEnhanceBtn.disabled = true;
+    processLocationInput.disabled = true;
+    processConditionInput.disabled = true;
+    processPriceInput.disabled = true;
+    processTitleInput.disabled = true;
+    processSaveBtn.disabled = true;
+    processSkipBtn.disabled = true;
+    const originalHTML = aiEnhanceBtn.innerHTML; // 记住原来的图标和文字（带小星星的那个）
+    aiEnhanceBtn.innerHTML = '<i class="ti ti-loader"></i> Enhancing...'; // 换成加载中的提示
+
+    // 3. 开始执行你的 Todo Invoke
+    try {
+      // 向 Rust 发送命令，假设我们在 Rust 里管这个函数叫 'enhance_text'
+      const rawAiResponse = await invoke<string>('enhance_text', { rawText: originalText });
+      
+      if (globalVars.processQueue[globalVars.currentIndex] !== trackingId || processView.classList.contains('hidden')) {
+          console.log("👻 发现幽灵数据！用户已切换房源，丢弃本次 AI 结果。");
+          return; // 直接干掉它，不准往下执行填表！
+      }
+
+// 2. 清理字符串（防御性编程）：有时候 AI 还是会手贱加上 ```json ... ```，我们把它过滤掉
+      const cleanJsonStr = rawAiResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+      
+      // 3. 把字符串转换成真正的 JavaScript 对象
+      const aiData = JSON.parse(cleanJsonStr);
+
+      // 检查 Title
+      if (!processTitleInput.value.trim() && aiData.title) {
+        processTitleInput.value = aiData.title;
+      }
+      
+      // 检查 Price
+      if (!processPriceInput.value.trim() && aiData.price) {
+        processPriceInput.value = aiData.price;
+      }
+      
+      // 检查 Condition
+      if (!processConditionInput.value.trim() && aiData.condition) {
+        processConditionInput.value = aiData.condition;
+      }
+      
+      // 检查 Location
+      if (!processLocationInput.value.trim() && aiData.location) {
+        processLocationInput.value = aiData.location;
+      }
+
+      // 描述通常是我们明确想要润色的核心，所以这里我们直接替换（如果你想保留旧的，也可以像上面那样写 if）
+      if (aiData.description) {
+        processDescEditor.value = aiData.description;
+      }
+
+    } catch (error) {
+      console.error("AI 处理失败或 JSON 解析错误:", error);
+      alert("Failed to extract data. The AI output might not be in correct format.");
+    } finally {
+      aiEnhanceBtn.disabled = false;
+      processLocationInput.disabled = false;
+      processConditionInput.disabled = false;
+      processPriceInput.disabled = false;
+      processTitleInput.disabled = false;
+      processSaveBtn.disabled = false;
+      processSkipBtn.disabled = false;
+      aiEnhanceBtn.innerHTML = originalHTML;
+    }
+  });
+const processWatermarkBtn = document.getElementById('add-watermark-btn') as HTMLButtonElement;
+
+  processWatermarkBtn?.addEventListener('click', async () => {
+    // 1. 抓取当前网格里“活着的”照片路径（被叉掉的就不管了）
+    const photoItems = document.querySelectorAll('#process-photo-grid .photo-item');
+    // 把它们变成一个装满路径的 Array (列表)
+    const paths = Array.from(photoItems).map(item => (item as HTMLElement).dataset.path);
+
+    if (paths.length === 0) {
+      alert("No images to watermark!");
+      return;
+    }
+
+    // 2. 按钮彻底上锁
+    processWatermarkBtn.disabled = true;
+    const originalText = processWatermarkBtn.innerHTML;
+    processWatermarkBtn.innerHTML = '<i class="ti ti-loader"></i> Processing...';
+
+    // ✨ 这里先写死你的名字，以后可以从 Settings 页面读取
+    const dynamicWatermarkText = "Canny Chong\n016-5583820"; 
+
+    try {
+      // 3. 呼叫 Rust 时，把整个 Array (paths) 和文字 一次性传过去！
+      const resultMsg = await invoke<string>('add_watermark', { 
+        imagePaths: paths,
+        watermarkText: dynamicWatermarkText 
+      });
+      
+      const timestamp = new Date().getTime();
+
+      photoItems.forEach(item => {
+        const imgEl = item.querySelector('img') as HTMLImageElement;
+        if (imgEl) {
+           // 利用 URL 对象来清理和追加时间戳，骗过浏览器让它重新去硬盘读取
+           const url = new URL(imgEl.src);
+           url.searchParams.set('t', timestamp.toString()); // 变成类似 http://...?t=123456789
+           imgEl.src = url.toString();
+        }
+      });
+      
+      console.log(resultMsg);
+      // 4. 10 张图全盖完章了，只弹一次提示！
+      alert("✅ Watermark added successfully!");
+      
+    } catch (error) {
+      console.error("加水印失败:", error);
+      alert("Failed to add watermark. " + error);
+    } finally {
+      // 5. 解锁按钮
+      processWatermarkBtn.disabled = false;
+      processWatermarkBtn.innerHTML = originalText;
+    }
+  });
+
+  // 5. 下一步与退出逻辑
+  processSaveBtn?.addEventListener('click', async () => {
+    // TODO: 这里可以调用 invoke('save_property_update') 讲修改后的文本存进数据库
+  processSaveBtn.disabled = true;
+  const originalText = processSaveBtn.innerHTML;
+  processSaveBtn.innerHTML = '<i class="ti ti-loader"></i> Saving...';
+  const currentId = globalVars.processQueue[globalVars.currentIndex];
+  const prop = appState.properties.get(currentId);
+
+  if (prop) {
+    // 1. 同步更新前端内存的数据（状态 + 修改后的描述）
+    prop.status = "processed";
+    prop.desc = processDescEditor.value; // 把文本框里你修改过的内容也存起来
+    prop.title = processTitleInput.value;
+    prop.price = processPriceInput.value;
+    prop.condition = processConditionInput.value;
+    prop.location = processLocationInput.value;
+
+    const photoItems = document.querySelectorAll('#process-photo-grid .photo-item');
+    const orderedPaths = Array.from(photoItems).map(item => (item as HTMLElement).dataset.path);
+
+    // 2. 呼叫 Rust 存进 SQLite 数据库（持久化）
+    try {
+      // 这个 invoke 对应你 main.rs 里的 save_property_update 函数
+      await invoke('save_property_update', { 
+id: currentId, 
+        title: prop.title,
+        price: prop.price,
+        condition: prop.condition,
+        location: prop.location,
+        newDesc: prop.desc
+      });
+
+      
+    await invoke('save_photo_order',{orderedPaths:orderedPaths,deletedPaths: deletedPhotosQueue});
+
+      console.log(`✅ 房源 ${currentId} 已保存到数据库`);
+    } catch (e) {
+      console.error("保存失败:", e);
+      alert("Save failed, please try again.");
+      return; // 如果数据库保存失败，阻止它跳到下一个
+    }
+    renderGrid();
+
+  }
+    globalVars.currentIndex++;
+    if (globalVars.currentIndex < globalVars.processQueue.length) {
+      loadPropertyIntoProcessView(globalVars.processQueue[globalVars.currentIndex]); // 加载下一个
+    } else {
+      alert("🎉 All selected properties are processed!");
+      closeProcessView();
+
+      processSaveBtn.disabled = false;
+      processSaveBtn.innerHTML = originalText;
+    }
+  });
+
+  document.getElementById('back-to-list-btn')?.addEventListener('click', closeProcessView);
+
+  processSkipBtn?.addEventListener('click', () => {
+    globalVars.currentIndex++;
+    if (globalVars.currentIndex < globalVars.processQueue.length) {
+      loadPropertyIntoProcessView(globalVars.processQueue[globalVars.currentIndex]); // 直接加载下一个，不保存
+    } else {
+      alert("🎉 All selected properties are processed!");
+      closeProcessView();
+    }
+  });
+}
+
+export function closeProcessView() {
+    processView.classList.add('hidden');
+    mainView?.classList.remove('hidden');
+    appState.selectedIds.clear(); // 清空选择
+    renderGrid(); // 刷新主界面
+  }
+
+export function updatePhotoNumbers() {
+    const processPhotoGrid = document.getElementById('process-photo-grid');
+    if (!processPhotoGrid) return;
+    const badges = processPhotoGrid.querySelectorAll('.number-badge');
+    badges.forEach((badge, i) => {
+      badge.textContent = (i + 1).toString();
+    });
+  }
+
+export function renderDraggableGrid(images: string[]) {
+    const processPhotoGrid = document.getElementById('process-photo-grid') as HTMLElement;
+    processPhotoGrid.innerHTML = '';
+
+    images.forEach((fullPath, index) => {
+      const imgSrc = convertFileSrc(fullPath);
+      const item = document.createElement('div');
+      item.className = 'photo-item';
+      
+      // 🚨 注意：这里什么拖拽事件都不自己写了，完全交给下面的 Sortable！
+      item.dataset.path = fullPath;
+
+      item.innerHTML = `
+        <div class="number-badge">${index + 1}</div>
+        <div class="delete-btn" title="Remove photo"><i class="ti ti-x"></i></div>
+        <img src="${imgSrc}" style="width:100%; height:100%; object-fit:cover; pointer-events:none; -webkit-user-drag:none;">
+      `;
+
+      // --- 点击叉叉删除照片 ---
+      const deleteBtn = item.querySelector('.delete-btn') as HTMLElement;
+      deleteBtn.addEventListener('click', (e) => {
+        e.stopPropagation(); 
+        
+        // ✨ 新增：把这张要删掉的真实路径加进“死亡名单”
+        deletedPhotosQueue.push(fullPath);
+
+        item.remove();       
+        updatePhotoNumbers(); 
+      });
+
+      processPhotoGrid.appendChild(item);
+    });
+
+    if (sortableInstance) {
+      sortableInstance.destroy(); 
+    }
+    
+    // ✨ 召唤神龙！用最稳妥的配置
+    // @ts-ignore
+    sortableInstance = new Sortable(processPhotoGrid, {
+      animation: 150,           
+      ghostClass: 'dragging',   
+      forceFallback: true,      // 依然保留这个，对抗原生 🚫
+      fallbackClass: 'dragging', 
+      onEnd: function () {
+        updatePhotoNumbers();   
+      }
+    });
+  }
+
+  export async function loadPropertyIntoProcessView(
+    id: string
+) {
+  deletedPhotosQueue = [];
+  const prop = appState.properties.get(id);
+  if (!prop) return;
+
+  processTitle.textContent = prop.addr || `Property ${id}`;
+  processProgress.textContent = `${globalVars.currentIndex + 1} of ${globalVars.processQueue.length}`;
+  processDescEditor.value = prop.desc || ""; // 填入真实的描述
+  processPhotoGrid.innerHTML = 'Loading images...';
+
+  processTitleInput.value = prop.title || "";
+  processLocationInput.value = prop.location || "";
+  processConditionInput.value = prop.condition || "";
+  processPriceInput.value = prop.price || "";
+
+  try {
+    // 呼叫上一轮我们写好的 Rust 接口，拿到所有图片！
+    const images = await invoke<string[]>('get_all_images', { folderPath: prop.folderPath });
+    renderDraggableGrid(images);
+  } catch (e) {
+    processPhotoGrid.innerHTML = 'No images found for this property.';
+  }
+}
+ let renderVersion = 0;
+ export async function renderGrid() {
+    const currentVersion = ++renderVersion;
+    // 1. 清空当前网格（保留 empty state 元素）
+    cardGrid.innerHTML = '';
+    cardGrid.appendChild(gridEmpty);
+
+    let displayCount = 0;
+    let newCount = 0;
+
+    // 2. 遍历所有数据，判断是否需要显示
+    for(const [id, prop] of appState.properties) {
+      // 统计 'new' 的数量
+      if (prop.status === 'new') newCount++;
+
+      // 筛选逻辑 (Tab 切换)
+      if (appState.currentTab === 'new' && prop.status !== 'new') continue;
+      
+      // 搜索逻辑
+      if (appState.searchQuery) {
+        const query = appState.searchQuery.toLowerCase();
+        if (!prop.addr.toLowerCase().includes(query) && !prop.desc.toLowerCase().includes(query)) {
+          continue;
+        }
+      }
+
+      displayCount++;
+      const card = await createCardElement(prop); // 👈 在这里去等图片（程序在这里暂停）
+
+      // ✨✨✨ 加上这两行终极防御！✨✨✨
+      // 睡醒后的第一件事：检查全局的 renderVersion 有没有背着我偷偷变大？
+      if (currentVersion !== renderVersion) {
+        return; // 如果变大了，说明有新的渲染任务进来了，我这个旧任务直接自我毁灭，不再往下执行！
+      }
+
+      // 检查通过，安全！塞入画面：
+      cardGrid.insertBefore(card, cardGrid.firstChild);
+    };
+
+    // 3. 更新各种 UI 计数器
+    newCountLabel.textContent = newCount.toString();
+    allCountLabel.textContent = appState.properties.size.toString();
+    toolbarLabel.textContent = `${displayCount} properties found`;
+
+    // 4. 判断是否显示空状态
+    if (displayCount === 0) {
+      gridEmpty.style.display = 'flex';
+    } else {
+      gridEmpty.style.display = 'none';
+    }
+  }
+
+  export async function createCardElement(prop: PropertyData): Promise<HTMLElement> {
+    const card = document.createElement('div');
+    card.className = 'prop-card';
+    if (appState.selectedIds.has(prop.id)) {
+      card.classList.add('selected');
+    }
+
+    const isNew = prop.status === 'new';
+    const badgeHTML = isNew
+      ? `<span class="badge badge-new">New</span>`
+      : `<span class="badge badge-processed">Done</span>`;
+    let imgSrc = "";
+
+ 
+    let imgHTML = '<i class="ti ti-building"></i>';
+    try {
+      const fullPath = await invoke<string>('get_first_image', { folderPath: prop.folderPath });
+      imgHTML = `<img src="${convertFileSrc(fullPath)}" alt="property thumbnail">`;
+    } catch {
+      // 没有图片，显示占位图标
+    }
+    card.innerHTML = `
+      <div class="card-check"><i class="ti ti-check" aria-hidden="true"></i></div>
+      <div class="card-thumb">${imgHTML}</div>
+      <div class="card-body">
+        <div class="card-addr">${prop.addr}</div>
+        <div class="card-meta">
+          <span class="card-source">${prop.source ?? 'Telegram Bot'}</span>
+          ${badgeHTML}
+        </div>
+      </div>
+    `;
+
+    // 绑定点击事件：选中状态切换 + 显示右侧详情
+    card.addEventListener('click', () => {
+      // 切换选中状态
+      if (appState.selectedIds.has(prop.id)) {
+        appState.selectedIds.delete(prop.id);
+        card.classList.remove('selected');
+      } else {
+        appState.selectedIds.add(prop.id);
+        card.classList.add('selected');
+      }
+      
+      updateActionBar();
+      showDetail(prop.id);
+    });
+
+    return card;
+  }
+
+   export function updateActionBar() {
+    const count = appState.selectedIds.size;
+    if (count > 0) {
+      actionBar.style.display = 'flex'; // 显示 (你也可以用 classList.add('visible'))
+      selLabel.textContent = `${count} selected`;
+    } else {
+      actionBar.style.display = 'none';
+    }
+  }
+
+  
+  // 在右侧面板显示详情
+  async function showDetail(id: string) {
+    const prop = appState.properties.get(id);
+    appState.currentDetailId = id;
+    if (!prop) return;
+
+    globalVars.currentViewingId = id;
+    
+    // 隐藏空状态，显示详情面板
+    detailEmpty.style.display = 'none';
+    detailFilled.classList.remove('hidden'); // 对应你 HTML 里的 class
+
+    // 填充数据
+    dAddr.textContent = prop.addr;
+    dSource.textContent = prop.source || 'N/A';
+    dTime.textContent = prop.time || 'Unknown time';
+    dDesc.value = prop.desc;
+    did.textContent = prop.id;
+    
+    // 替换缩略图颜色
+    detailThumb.innerHTML = '<i class="ti ti-building" aria-hidden="true"></i>';
+    
+    // 2. 向 Rust 请求该房源的第一张图
+    try {
+      if (prop.folderPath) {
+        const fullPath = await invoke<string>('get_first_image', { folderPath: prop.folderPath });
+        const imgSrc = convertFileSrc(fullPath);
+        // 3. 把图片塞进右侧的缩略图框里
+        detailThumb.innerHTML = `<img src="${imgSrc}" style="width:100%; height:100%; object-fit:cover; border-radius: 8px;">`;
+      }
+    } catch (e) {
+      console.log("右侧详情页加载图片失败:", e);
+      // 如果失败了，就什么都不做，保持默认图标
+    }
+  }

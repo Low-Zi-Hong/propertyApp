@@ -7,15 +7,72 @@ use dotenvy::dotenv;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::sync::{LazyLock, Mutex};
-use tauri::{AppHandle, Manager, State};
 use std::fs;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
+use tauri::{AppHandle, Manager, State};
 
 mod database;
-mod telegram;
 mod llmEnhance;
+mod telegram;
 mod watermark;
+
+//app config
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(rename = "botToken")]
+    pub bot_token: String,
+    #[serde(rename = "deepseekApiKey")]
+    pub deepseek_api_key: String,
+    #[serde(rename = "defaultChatId")]
+    pub default_chat_id: String,
+    #[serde(rename = "folderPath")]
+    pub folder_path: String,
+}
+
+// 辅助函数：安全抓取本地系统专属的 config.json 路径
+fn get_config_path(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    // 自动定位到用户的系统漫游目录，例如 Roaming/PropBot
+    let mut path = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+
+    // 确保这个文件夹在硬盘上确实存在，没有就建一个
+    if !path.exists() {
+        std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    }
+
+    path.push("config.json");
+    Ok(path)
+}
+// 供 Rust 后端各模块随时捞取最新 Token / Chat ID 的热加载函数
+pub fn load_config_internally(app_handle: &tauri::AppHandle) -> (String, String, String, String) {
+    // 尝试读取物理 config.json
+    if let Ok(mut path) = app_handle.path().app_data_dir() {
+        path.push("config.json");
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
+                    return (
+                        config.bot_token,
+                        config.deepseek_api_key,
+                        config.default_chat_id,
+                        config.folder_path,
+                    );
+                }
+            }
+        }
+    }
+    // 没有文件时拿 .env 续命
+    (
+        std::env::var("BOT_TOKEN").unwrap_or_default(),
+        std::env::var("DEEPSEEK_API_KEY").unwrap_or_default(),
+        String::new(),
+        std::env::var("FOLDER_PATH").unwrap_or_default(),
+    )
+}
 
 // ==========================================
 // 1. 数据模型 (加上反序列化重命名，解决命名规范问题)
@@ -25,9 +82,9 @@ pub struct Property {
     pub id: String,
     pub addr: String,
     pub desc: String,
-    pub title: Option<String>,     
-    pub price: Option<String>,     
-    pub condition: Option<String>, 
+    pub title: Option<String>,
+    pub price: Option<String>,
+    pub condition: Option<String>,
     pub location: Option<String>,
     pub source: String,
     pub color: String,
@@ -55,7 +112,7 @@ async fn get_all_properties(state: State<'_, AppState>) -> Result<Vec<Property>,
         .prepare("SELECT id, addr, description, source, color, status, folder_path, title, price, condition, location FROM properties")
         .map_err(|e| e.to_string())?;
 
-let prop_iter = stmt
+    let prop_iter = stmt
         .query_map([], |row| {
             Ok(Property {
                 id: row.get::<_, i64>(0)?.to_string(),
@@ -65,10 +122,10 @@ let prop_iter = stmt
                 color: row.get(4)?,
                 status: row.get(5)?,
                 folder_path: row.get(6)?,
-                title: row.get(7)?,      // 👈 新增读取
-                price: row.get(8)?,      // 👈 新增读取
-                condition: row.get(9)?,  // 👈 新增读取
-                location: row.get(10)?,  // 👈 新增读取
+                title: row.get(7)?,     // 👈 新增读取
+                price: row.get(8)?,     // 👈 新增读取
+                condition: row.get(9)?, // 👈 新增读取
+                location: row.get(10)?, // 👈 新增读取
             })
         })
         .map_err(|e| e.to_string())?;
@@ -83,15 +140,15 @@ let prop_iter = stmt
 #[tauri::command]
 async fn save_property_update(
     id: String,
-    title: String,       
-    price: String,       
-    condition: String,   
+    title: String,
+    price: String,
+    condition: String,
     location: String,
     new_desc: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let conn = state.db.lock().unwrap();
-conn.execute(
+    conn.execute(
         "UPDATE properties SET 
             title = ?1, 
             price = ?2, 
@@ -108,16 +165,21 @@ conn.execute(
 }
 
 #[tauri::command]
-async fn archive_property(id: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn archive_property(
+    app_handle: tauri::AppHandle,
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let (_, _, _, DOWNLOAD_DIR) = crate::load_config_internally(&app_handle);
     {
-    let conn = state.db.lock().unwrap();
-    conn.execute("DELETE FROM properties WHERE id = ?1", [&id])
-        .map_err(|e| e.to_string())?;
+        let conn = state.db.lock().unwrap();
+        conn.execute("DELETE FROM properties WHERE id = ?1", [&id])
+            .map_err(|e| e.to_string())?;
     }
-// 2. 删除本地对应的图片文件夹
-    let folder_path = format!("{}/{}", *DOWNLOAD_DIR, id);
+    // 2. 删除本地对应的图片文件夹
+    let folder_path = format!("{}/{}", DOWNLOAD_DIR, id);
     let path = Path::new(&folder_path);
-    
+
     // 如果文件夹存在，就执行连根拔起 (remove_dir_all)
     if path.exists() {
         std::fs::remove_dir_all(path).map_err(|e| format!("删除文件夹失败: {}", e))?;
@@ -128,24 +190,19 @@ async fn archive_property(id: String, state: State<'_, AppState>) -> Result<(), 
 #[tauri::command]
 async fn get_first_image(folder_path: String) -> Result<String, String> {
     let path = Path::new(&folder_path);
-    
+
     // 检查 1：路径存在吗？
     if !path.exists() {
-
         return Err("Folder not found".into());
     }
-    
+
     // 检查 2：是文件夹吗？
     if !path.is_dir() {
-
         return Err("Not a directory".into());
     }
 
     // 检查 3：获取绝对路径成功了吗？
-    let abs_path = std::fs::canonicalize(path).map_err(|e| {
-
-        e.to_string()
-    })?;
+    let abs_path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
 
     let entries = std::fs::read_dir(&abs_path).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
@@ -153,17 +210,16 @@ async fn get_first_image(folder_path: String) -> Result<String, String> {
         if let Some(ext) = file_path.extension() {
             let ext_str = ext.to_string_lossy().to_lowercase();
             if ext_str == "jpg" || ext_str == "jpeg" || ext_str == "png" {
-                
                 let mut path_str = file_path.to_string_lossy().into_owned();
                 if path_str.starts_with("\\\\?\\") {
                     path_str = path_str.replace("\\\\?\\", "");
                 }
-                
+
                 return Ok(path_str);
             }
         }
     }
-    
+
     println!("⚠️ [Rust] 文件夹里没有找到任何 jpg/png 图片！");
     Err("No image found".into())
 }
@@ -193,19 +249,21 @@ async fn get_all_images(folder_path: String) -> Result<Vec<String>, String> {
             }
         }
     }
-    
+
     Ok(images)
 }
 
 #[tauri::command]
-async fn save_photo_order(ordered_paths: Vec<String>, deleted_paths: Vec<String>) -> Result<String, String> {
-    
+async fn save_photo_order(
+    ordered_paths: Vec<String>,
+    deleted_paths: Vec<String>,
+) -> Result<String, String> {
     // ✨ 1. 先把死亡名单里的照片彻底物理删除！
     for path_str in &deleted_paths {
         let path = std::path::Path::new(path_str);
         if path.exists() {
             // std::fs::remove_file 会直接从电脑硬盘里删掉这个文件
-            let _ = std::fs::remove_file(path); 
+            let _ = std::fs::remove_file(path);
         }
     }
 
@@ -232,17 +290,41 @@ async fn save_photo_order(ordered_paths: Vec<String>, deleted_paths: Vec<String>
     Ok("Photos sorted, renamed, and deleted successfully".to_string())
 }
 
+#[tauri::command]
+async fn get_app_config(app_handle: tauri::AppHandle) -> Result<AppConfig, String> {
+    let path = get_config_path(&app_handle)?;
+
+    if path.exists() {
+        // 1. 如果有 config.json，直接读取并反序列化给前端
+        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let config: AppConfig = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        Ok(config)
+    } else {
+        // 2. 如果是第一次启动没有文件，则读取 .env 的值作为安全兜底
+        Ok(AppConfig {
+            bot_token: std::env::var("BOT_TOKEN").unwrap_or_default(),
+            deepseek_api_key: std::env::var("DEEPSEEK_API_KEY").unwrap_or_default(),
+            default_chat_id: String::new(),
+            folder_path: std::env::var("FOLDER_PATH").unwrap_or_default(),
+        })
+    }
+}
+
+#[tauri::command]
+async fn save_app_config(config: AppConfig, app_handle: tauri::AppHandle) -> Result<(), String> {
+    let path = get_config_path(&app_handle)?;
+
+    // 漂亮格式化序列化成 JSON 文本并异步写入物理硬盘
+    let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())?;
+
+    println!("⚙️ 系统配置更新成功，已写入硬盘！");
+    Ok(())
+}
+
 // ==========================================
 // 4. 静态变量 (LazyLock)
 // ==========================================
-pub static BOT_TOKEN: LazyLock<String> =
-    LazyLock::new(|| env::var("BOT_TOKEN").expect("BOT_TOKEN must be set"));
-
-pub static DOWNLOAD_DIR: LazyLock<String> =
-    LazyLock::new(|| env::var("FOLDER_PATH").expect("FOLDER_PATH must be set"));
-
-pub static DEEPSEEK_TOKEN: LazyLock<String> =
-    LazyLock::new(|| env::var("DEEPSEEK_API_KEY").expect("FOLDER_PATH must be set"));
 
 pub const WATERMARKTEXT: &str = "Canny Chong\n016-5583820";
 
@@ -255,13 +337,8 @@ async fn main() {
 
     // --- 第一步：启动数据库并获取断点 ---
     // 我们需要预先拿到最后一条消息 ID (last_id)，用来告诉 Telegram 从哪开始抓
-    let (conn, last_id) = database::bootstrap().expect("数据库初始化失败");
-    println!("📦 数据库已就绪，最后处理的 ID: {}", last_id);
 
     tauri::Builder::default()
-        .manage(AppState {
-            db: Mutex::new(conn),
-        })
         .invoke_handler(tauri::generate_handler![
             get_all_properties,
             save_property_update,
@@ -270,11 +347,20 @@ async fn main() {
             get_all_images,
             save_photo_order,
             llmEnhance::enhance_text,
-            watermark::add_watermark
+            watermark::add_watermark,
+            telegram::send_to_telegram,
+            get_app_config,
+            save_app_config,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
 
+            let (conn, last_id) = database::bootstrap(handle.clone()).expect("数据库初始化失败");
+            println!("📦 数据库已就绪，最后处理的 ID: {}", last_id);
+
+            app.manage(AppState {
+                db: Mutex::new(conn),
+            });
             // --- 第二步：启动 Telegram 任务，并传入断点 ---
             // 现在的任务知道该从 last_id + 1 开始拉取数据了
             telegram::spawn_telegram_task(handle, last_id);
