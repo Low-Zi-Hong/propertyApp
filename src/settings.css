@@ -1,0 +1,342 @@
+/* =============================================================
+   settings.css — PropBot Settings Page
+   Shares the same design tokens as styles.css.
+   Import Inter + Tabler Icons in the HTML head.
+   ============================================================= */
+
+/* ── Tokens (mirror from styles.css) ────────────────────────── */
+:root {
+  --font: 'Inter', system-ui, sans-serif;
+
+  --bg:          #ffffff;
+  --bg-subtle:   #f7f7f6;
+  --bg-hover:    #f0f0ee;
+  --bg-selected: #eff6ff;
+
+  --border:       rgba(0, 0, 0, 0.09);
+  --border-md:    rgba(0, 0, 0, 0.16);
+  --border-focus: #60a5fa;
+
+  --text:   #111110;
+  --text-2: #6b6b68;
+  --text-3: #a1a19e;
+
+  --info-bg:      #eff6ff;
+  --info-text:    #1d4ed8;
+  --success-bg:   #f0fdf4;
+  --success-text: #15803d;
+  --danger-bg:    #fef2f2;
+  --danger-text:  #b91c1c;
+  --danger-border:#fecaca;
+
+  --r-sm: 5px;
+  --r-md: 8px;
+  --r-lg: 12px;
+
+  --nav-w: 220px;
+}
+
+/* ── Reset ───────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font);
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  height: 100vh;
+}
+
+/* ── Shell ───────────────────────────────────────────────────── */
+.settings-shell {
+  display: grid;
+  grid-template-columns: var(--nav-w) 1fr;
+  height: 100vh;
+}
+
+/* ── Sidebar nav ─────────────────────────────────────────────── */
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  border-right: 0.5px solid var(--border);
+  background: var(--bg-subtle);
+  overflow-y: auto;
+}
+
+.nav-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 0.5px solid var(--border);
+  flex-shrink: 0;
+}
+
+.nav-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.back-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-family: var(--font);
+  color: var(--text-2);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--r-sm);
+  transition: color 0.1s, background 0.1s;
+  flex-shrink: 0;
+}
+.back-btn:hover { color: var(--text); background: var(--bg-hover); }
+
+.nav-list {
+  list-style: none;
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text-2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s, color 0.1s;
+}
+.nav-item i { font-size: 16px; flex-shrink: 0; }
+.nav-item:hover { background: var(--bg-hover); color: var(--text); }
+.nav-item.active {
+  background: var(--bg-selected);
+  color: var(--info-text);
+  font-weight: 500;
+}
+.nav-item.active i { color: var(--info-text); }
+
+/* ── Main content ────────────────────────────────────────────── */
+.settings-main {
+  overflow-y: auto;
+  padding: 36px 48px;
+}
+
+/* Section visibility */
+.settings-section { display: none; }
+.settings-section.active { display: block; }
+
+/* Section header */
+.section-header {
+  margin-bottom: 28px;
+  padding-bottom: 16px;
+  border-bottom: 0.5px solid var(--border);
+}
+
+.section-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.section-desc {
+  font-size: 13px;
+  color: var(--text-2);
+  margin-top: 4px;
+}
+
+/* Settings group */
+.settings-group {
+  margin-bottom: 32px;
+}
+
+.group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+  padding-bottom: 8px;
+  border-bottom: 0.5px solid var(--border);
+}
+
+/* Setting row */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 14px 0;
+  border-bottom: 0.5px solid var(--border);
+}
+.setting-row:last-child { border-bottom: none; }
+
+.setting-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.setting-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.setting-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.setting-hint code {
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 11px;
+  background: var(--bg-hover);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--text-2);
+}
+
+.setting-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ── Form controls ───────────────────────────────────────────── */
+.styled-input,
+.styled-select {
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 0.5px solid var(--border-md);
+  border-radius: var(--r-md);
+  padding: 6px 10px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  min-width: 220px;
+}
+.styled-input::placeholder { color: var(--text-3); }
+.styled-input:focus,
+.styled-select:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
+}
+
+/* Toggle switch */
+.toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toggle {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  background: var(--border-md);
+  border-radius: 20px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.toggle input:checked + .toggle-track { background: var(--info-text); }
+.toggle-track::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.toggle input:checked + .toggle-track::after { transform: translateX(16px); }
+
+/* Status pill */
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 4px 10px;
+  border: 0.5px solid var(--border);
+  border-radius: 20px;
+  background: var(--bg-subtle);
+}
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: background 0.3s;
+}
+.status-dot.online  { background: #3cb55a; }
+.status-dot.offline { background: #ef4444; }
+
+/* ── Buttons ─────────────────────────────────────────────────── */
+button, .btn {
+  font-family: var(--font);
+  font-size: 13px;
+  cursor: pointer;
+  border: 0.5px solid var(--border-md);
+  background: transparent;
+  color: var(--text-2);
+  border-radius: var(--r-md);
+  padding: 6px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.1s, color 0.1s;
+  white-space: nowrap;
+}
+button:hover, .btn:hover { background: var(--bg-hover); color: var(--text); }
+button:active, .btn:active { transform: scale(0.98); }
+button:disabled, .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+.btn.primary {
+  background: var(--text);
+  color: var(--bg);
+  border-color: transparent;
+}
+.btn.primary:hover { opacity: 0.82; }
+
+.btn.danger {
+  color: var(--danger-text);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+.btn.danger:hover { opacity: 0.82; }
+
+/* ── Scrollbar ───────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-md); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+/* ── Utility ─────────────────────────────────────────────────── */
+.hidden { display: none !important; }

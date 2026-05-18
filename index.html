@@ -7,6 +7,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
   <link rel="stylesheet" href="/src/styles.css" />
+  <link rel="stylesheet" href="/src/settings.css"/>
 </head>
 <body>
 
@@ -16,13 +17,19 @@
     <span class="app-title">PropBot</span>
     <div class="tabs">
       <div class="tab active" data-tab="new">
-        New <span class="tab-count" id="new-count">0</span>
+        New properties<span class="tab-count" id="new-count">0</span>
       </div>
       <div class="tab" data-tab="all">
         All properties <span class="tab-count" id="all-count">0</span>
       </div>
     </div>
     <div class="header-right">
+      <button id="go-publish-btn" class="btn" style="border: none;">
+        <i class="ti ti-send"></i> Publish
+      </button>
+      <button id="go-settings-btn" class="btn" style="padding: 6px; border: none; background: transparent;">
+        <i class="ti ti-settings" style="font-size: 20px;"></i>
+      </button>
       <div class="bot-pill">
         <div class="bot-dot" id="bot-dot"></div>
         <span id="bot-status-label">Connecting…</span>
@@ -120,7 +127,7 @@
     <div class="status-indicator" id="process-progress" style="font-size: 14px; color: var(--text-2);">1 of 3</div>
   </div>
 
-  <div class="main-conten" style="padding: 20px; overflow-y: auto;">
+  <div class="main-content" style="padding: 20px; overflow-y: auto;">
     <div class="photo-grid" id="process-photo-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px;">
       </div>
   </div>
@@ -163,6 +170,301 @@
     </div>
   </div>
   
+</div>
+
+<div id="publish-view" class="app hidden" style="position: fixed; inset: 0; z-index: 999; background: var(--bg);">
+
+  <!-- Header -->
+  <div class="process-header" style="grid-column: 1 / -1;">
+    <div class="process-header-left">
+      <button id="publish-back-btn" class="back-btn">
+        <i class="ti ti-arrow-left"></i> Back
+      </button>
+      <span class="process-title-label">Publish to Telegram</span>
+    </div>
+    <div class="process-progress" id="publish-progress">0 selected</div>
+  </div>
+
+  <!-- Left: card picker -->
+  <div class="main-content" style="border-right: 0.5px solid var(--border-md);">
+    <div class="toolbar" style="padding: 0 0 14px 0; border: none;">
+      <span class="toolbar-label" id="publish-toolbar-label">Select properties to publish</span>
+      <div class="toolbar-spacer"></div>
+      <div class="search-box" style="width: 180px;">
+        <i class="ti ti-search"></i>
+        <input type="text" id="publish-search-input" placeholder="Search…" />
+      </div>
+    </div>
+
+    <div class="card-grid" id="publish-card-grid" style="padding: 0; height: calc(100% - 48px);">
+      <div class="grid-empty" id="publish-grid-empty">
+        <i class="ti ti-inbox"></i>
+        <span>No processed properties</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: preview + send panel -->
+  <div class="sidebar">
+
+    <!-- Preview area -->
+    <div class="sidebar-content" id="publish-detail-empty-state">
+      <div style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--text-3); font-size: 13px;">
+        <i class="ti ti-hand-click" style="font-size: 32px;"></i>
+        <span>Select a property to preview</span>
+      </div>
+    </div>
+
+    <div class="sidebar-content hidden" id="publish-detail-panel" style="gap: 12px;">
+
+      <!-- Photo strip -->
+      <div id="publish-photo-strip" style="display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; flex-shrink: 0;">
+        <!-- 图片缩略图由 TS 动态填入 -->
+      </div>
+
+      <!-- Caption preview -->
+      <div class="input-group" style="flex: 1; display: flex; flex-direction: column;">
+        <label class="input-label">Caption Preview</label>
+        <textarea id="publish-caption" class="text-editor" placeholder="Auto-generated from property data…"></textarea>
+      </div>
+
+      <!-- Target chat input -->
+      <div class="input-group">
+        <label class="input-label">Target Chat ID</label>
+        <input type="text" id="publish-chat-id" class="styled-input" placeholder="e.g. @mychannel or -100123456">
+      </div>
+
+      <!-- Send status -->
+      <div id="publish-status" class="publish-status hidden"></div>
+
+    </div>
+
+    <!-- Footer -->
+    <div class="sidebar-footer">
+      <button id="publish-send-btn" class="btn primary" style="flex: 1; justify-content: center;" disabled>
+        <i class="ti ti-send"></i> Send to Telegram
+      </button>
+    </div>
+
+  </div>
+</div>
+
+<div id="settings-view" class="app hidden" style="position: fixed; inset: 0; z-index: 999; background: var(--bg);">
+<div class="settings-shell">
+
+  <!-- ── Sidebar nav ── -->
+  <nav class="settings-nav">
+    <div class="nav-header">
+      <button class="back-btn" id="settings-back-btn">
+        <i class="ti ti-arrow-left"></i> Back
+      </button>
+      <span class="nav-title">Settings</span>
+    </div>
+
+    <ul class="nav-list">
+      <li class="nav-item active" data-section="telegram">
+        <i class="ti ti-brand-telegram"></i> Telegram
+      </li>
+      <li class="nav-item" data-section="general">
+        <i class="ti ti-adjustments-horizontal"></i> General
+      </li>
+      <li class="nav-item" data-section="storage">
+        <i class="ti ti-folder"></i> Storage
+      </li>
+      <li class="nav-item" data-section="publish">
+        <i class="ti ti-send"></i> Publish
+      </li>
+
+      <!-- ↓ 你自己在这里加更多 nav-item -->
+
+    </ul>
+  </nav>
+
+  <!-- ── Content area ── -->
+  <main class="settings-main">
+
+    <!-- ===== Telegram ===== -->
+    <section class="settings-section active" id="section-telegram">
+      <div class="section-header">
+        <h2 class="section-title">Telegram</h2>
+        <p class="section-desc">Bot token and connection settings.</p>
+      </div>
+
+      <div class="settings-group">
+        <div class="group-label">Bot</div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Bot Token</span>
+            <span class="setting-hint">From BotFather. Stored in your <code>.env</code> file.</span>
+          </div>
+          <div class="setting-control">
+            <input type="password" id="s-bot-token" class="styled-input" placeholder="123456:ABC-DEF…">
+            <button class="btn" id="s-bot-token-save">Save</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Connection Status</span>
+            <span class="setting-hint">Live check against Telegram getMe.</span>
+          </div>
+          <div class="setting-control">
+            <div class="status-pill" id="s-bot-status">
+              <div class="status-dot"></div>
+              <span id="s-bot-status-label">Unknown</span>
+            </div>
+            <button class="btn" id="s-bot-test">Test</button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ↓ 你自己在这里加更多 Telegram setting -->
+
+    </section>
+
+    <!-- ===== General ===== -->
+    <section class="settings-section" id="section-general">
+      <div class="section-header">
+        <h2 class="section-title">General</h2>
+        <p class="section-desc">App-wide preferences.</p>
+      </div>
+
+      <div class="settings-group">
+        <div class="group-label">Appearance</div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Theme</span>
+            <span class="setting-hint">Light / Dark / System.</span>
+          </div>
+          <div class="setting-control">
+            <select class="styled-select" id="s-theme">
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+              <option value="system">System</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Language</span>
+            <span class="setting-hint">UI display language.</span>
+          </div>
+          <div class="setting-control">
+            <select class="styled-select" id="s-language">
+              <option value="en">English</option>
+              <option value="zh">中文</option>
+            </select>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ↓ 你自己在这里加更多 General setting -->
+
+    </section>
+
+    <!-- ===== Storage ===== -->
+    <section class="settings-section" id="section-storage">
+      <div class="section-header">
+        <h2 class="section-title">Storage</h2>
+        <p class="section-desc">Where files and database are saved.</p>
+      </div>
+
+      <div class="settings-group">
+        <div class="group-label">Paths</div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Download Folder</span>
+            <span class="setting-hint">Where images from Telegram are saved. Maps to <code>FOLDER_PATH</code> in .env.</span>
+          </div>
+          <div class="setting-control">
+            <input type="text" id="s-folder-path" class="styled-input" placeholder="/Users/you/PropBot/downloads" readonly>
+            <button class="btn" id="s-folder-pick">
+              <i class="ti ti-folder-open"></i> Browse
+            </button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Database</span>
+            <span class="setting-hint">SQLite file location.</span>
+          </div>
+          <div class="setting-control">
+            <input type="text" id="s-db-path" class="styled-input" placeholder="properties.db" readonly>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="settings-group">
+        <div class="group-label">Danger Zone</div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Clear All Data</span>
+            <span class="setting-hint">Delete all properties from the database. This cannot be undone.</span>
+          </div>
+          <div class="setting-control">
+            <button class="btn danger" id="s-clear-db">
+              <i class="ti ti-trash"></i> Clear database
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ↓ 你自己在这里加更多 Storage setting -->
+
+    </section>
+
+    <!-- ===== Publish ===== -->
+    <section class="settings-section" id="section-publish">
+      <div class="section-header">
+        <h2 class="section-title">Publish</h2>
+        <p class="section-desc">Default values used when sending listings to Telegram.</p>
+      </div>
+
+      <div class="settings-group">
+        <div class="group-label">Defaults</div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Default Chat ID</span>
+            <span class="setting-hint">Pre-fill the chat ID field on the Publish page.</span>
+          </div>
+          <div class="setting-control">
+            <input type="text" id="s-default-chat-id" class="styled-input" placeholder="@mychannel">
+            <button class="btn" id="s-default-chat-save">Save</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Max photos per post</span>
+            <span class="setting-hint">Telegram supports up to 10 per media group.</span>
+          </div>
+          <div class="setting-control">
+            <input type="number" id="s-max-photos" class="styled-input" style="width: 80px;" min="1" max="10" value="10">
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ↓ 你自己在这里加更多 Publish setting -->
+
+    </section>
+
+    <!-- ↓ 你自己在这里加更多 section，配合 nav-item 使用 -->
+
+  </main>
+
+</div>
 </div>
 
 <script type="module" src="/src/main.ts"></script>

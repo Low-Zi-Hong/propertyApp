@@ -112,8 +112,12 @@ body {
   color: var(--info-text);
 }
 
-.header-right { margin-left: auto; }
-
+.header-right { 
+  margin-left: auto; 
+  display: flex;           /* 让里面的元素横向排成一排 */
+  align-items: center;     /* 确保大家都在同一条水平线上，上下居中 */
+  gap: 16px;               /* ✨ 核心：在元素之间强制撑开 16px 的距离，拒绝贴贴！ */
+}
 .bot-pill {
   display: flex;
   align-items: center;
@@ -489,19 +493,19 @@ button.primary:hover, .btn.primary:hover { opacity: 0.82; background: var(--text
 ::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
 
 /* =============================================================
-   Process View 专属样式 (全屏覆盖界面)
+   全屏处理界面通用样式 (Process View & Publish View)
    ============================================================= */
-#process-view {
+#process-view, #publish-view {
   position: fixed; 
-  top: 0; 
-  left: 0; 
-  width: 100vw; 
-  height: 100vh; 
+  top: 0; left: 0; 
+  width: 100vw; height: 100vh; 
   z-index: 999; 
   background: var(--bg);
 }
 
-#process-view .process-header {
+/* ✨ 把下面这些的前缀从 #process-view 换成这两个共用 ✨ */
+#process-view .process-header,
+#publish-view .process-header {
   grid-column: 1 / -1; 
   display: flex; 
   justify-content: space-between; 
@@ -510,13 +514,15 @@ button.primary:hover, .btn.primary:hover { opacity: 0.82; background: var(--text
   border-bottom: 1px solid var(--border-md);
 }
 
-#process-view .process-header-left {
+#process-view .process-header-left,
+#publish-view .process-header-left {
   display: flex; 
   align-items: center; 
   gap: 15px;
 }
 
-#process-view .back-btn {
+#process-view .back-btn,
+#publish-view .back-btn {
   border: none; 
   background: transparent; 
   cursor: pointer; 
@@ -524,6 +530,36 @@ button.primary:hover, .btn.primary:hover { opacity: 0.82; background: var(--text
   display: flex; 
   align-items: center; 
   gap: 5px;
+}
+
+#process-view .title,
+#publish-view .process-title-label {
+  font-weight: 600; 
+  font-size: 16px;
+}
+
+#process-view .main-content,
+#publish-view .main-content {
+  padding: 20px; 
+  overflow-y: auto;
+}
+
+#process-view .sidebar,
+#publish-view .sidebar {
+  border-left: 1px solid var(--border-md); 
+  display: flex; 
+  flex-direction: column;
+}
+
+#process-view .sidebar-content,
+#publish-view .sidebar-content {
+  padding: 20px;
+  flex: 1; 
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  height: 100%;
+  overflow: hidden; 
 }
 
 #process-view .title {
@@ -536,36 +572,15 @@ button.primary:hover, .btn.primary:hover { opacity: 0.82; background: var(--text
   color: var(--text-2);
 }
 
-#process-view .main-content {
-  padding: 20px; 
-  overflow-y: auto;
-}
-
 #process-view .photo-grid {
   display: grid; 
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); 
   gap: 15px;
 }
 
-#process-view .sidebar {
-  border-left: 1px solid var(--border-md); 
-  display: flex; 
-  flex-direction: column;
-}
-
 #process-view .tabs {
   padding: 10px 20px; 
   border-bottom: 1px solid var(--border-md);
-}
-
-#process-view .sidebar-content {
-  padding: 20px;
-  flex: 1; 
-  display: flex;
-  flex-direction: column;
-  gap: 15px;
-  height: 100%; /* 占满高度 */
-  overflow: hidden; /* 防止出现双滚动条 */
 }
 
 #process-view .ai-toolbar {
@@ -723,4 +738,38 @@ button.primary:hover, .btn.primary:hover { opacity: 0.82; background: var(--text
 #process-view .delete-btn:hover {
   color: #e74c3c; /* 鼠标放上去时变成红色警示 */
   border-color: #e74c3c;
+}
+
+#publish-photo-strip img {
+  height: 72px;
+  width: 72px;
+  object-fit: cover;
+  border-radius: var(--r-sm);
+  border: 1.5px solid var(--border);
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: border-color 0.1s;
+}
+#publish-photo-strip img:hover {
+  border-color: var(--border-md);
+}
+
+/* Send status message */
+.publish-status {
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  text-align: center;
+}
+.publish-status.success {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+.publish-status.error {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+.publish-status.sending {
+  background: var(--info-bg);
+  color: var(--info-text);
 }
