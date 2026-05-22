@@ -1,0 +1,41 @@
+name: 'Release Tauri App'
+
+# 触发条件：只有当你 push 像 v1.0.0 这样的 tag 时，才会触发打包
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    permissions:
+      contents: write # 必须要有写入权限，才能自动创建 Release
+    runs-on: windows-latest # 专门为你打 Windows .exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        # 如果你用 pnpm，改成 pnpm install；yarn 就改 yarn install
+        run: npm install 
+
+      - name: Build and Publish Tauri App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # 它会自动抓取你 tauri.conf.json 里的版本号
+          tagName: v__VERSION__ 
+          releaseName: 'Property App v__VERSION__'
+          releaseBody: '🎉 新版本发布！请下载下方的 .msi 或 .exe 文件进行安装。'
+          releaseDraft: false
+          prerelease: false

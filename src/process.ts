@@ -397,7 +397,7 @@ export function renderDraggableGrid(images: string[]) {
     let newCount = 0;
 
     // 2. 遍历所有数据，判断是否需要显示
-    for(const [id, prop] of appState.properties) {
+    for(const [_, prop] of appState.properties) {
       // 统计 'new' 的数量
       if (prop.status === 'new') newCount++;
 
@@ -449,7 +449,6 @@ export function renderDraggableGrid(images: string[]) {
     const badgeHTML = isNew
       ? `<span class="badge badge-new">New</span>`
       : `<span class="badge badge-processed">Done</span>`;
-    let imgSrc = "";
 
  
     let imgHTML = '<i class="ti ti-building"></i>';
