@@ -1,6 +1,5 @@
-import { invoke,convertFileSrc } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import Sortable from 'sortablejs';
 
 import { appState, globalVars ,PropertyData} from './state';
 import { initProcessView, loadPropertyIntoProcessView,renderGrid,updateActionBar } from './process';
@@ -200,7 +199,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderGrid(); // 重新渲染，新卡片会自动出现在最前
       });
 
-      await listen('update-card',(event) =>{
+      await listen('update-card',() =>{
         renderGrid();
       });
 

@@ -1,5 +1,5 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-import { appState, globalVars } from './state';
+import { appState } from './state';
 
 // ==========================================
 // 1. 顶层声明区 (声明所有会用到的 DOM 和全局变量)
@@ -90,7 +90,7 @@ export async function renderPublishGrid() {
 
   let count = 0;
 
-  for (const [id, prop] of appState.properties) {
+  for (const [_, prop] of appState.properties) {
     if (prop.status !== 'processed') continue;
 
     count++;
