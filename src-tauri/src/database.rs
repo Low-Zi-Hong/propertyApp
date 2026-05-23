@@ -1,5 +1,6 @@
 use rusqlite::{Connection, Result};
 use std::path::PathBuf;
+use crate::{AgreementData};
 
 pub fn bootstrap(
     app_handle: tauri::AppHandle,
@@ -24,6 +25,33 @@ pub fn bootstrap(
             price TEXT,       
             condition TEXT,   
             location TEXT    
+        )",
+        [],
+    )?;
+
+    // 执行这段 SQL 来创建合同表
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agreements (
+            id TEXT PRIMARY KEY,
+            property_id TEXT,
+            landlord_name TEXT,
+            landlord_ic TEXT,
+            landlord_address TEXT,
+            landlord_phone TEXT,
+            tenant_name TEXT,
+            tenant_ic TEXT,
+            tenant_address TEXT,
+            tenant_phone TEXT,
+            property_address TEXT,
+            term_of_tenancy TEXT,
+            commencement_date TEXT,
+            expiry_date TEXT,
+            monthly_rental TEXT,
+            rental_deposit TEXT,
+            utility_deposit TEXT,
+            payment_mode TEXT,
+            content_html TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
         [],
     )?;

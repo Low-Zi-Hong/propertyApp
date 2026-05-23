@@ -16,6 +16,7 @@ mod database;
 mod llmEnhance;
 mod telegram;
 mod watermark;
+mod agreement;
 
 //app config
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +92,42 @@ pub struct Property {
     pub status: String,
     #[serde(rename = "folderPath")] // 前端依然看 folderPath，Rust 内部用 folder_path
     pub folder_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgreementData {
+    pub id: String,                     // 唯一 UUID (如 AGR-12345)
+    pub property_id: Option<String>,    // 关联的房源ID (如果是独立创建，可以为 None)
+    
+    // Landlord
+    pub landlord_name: String,
+    pub landlord_ic: String,
+    pub landlord_address: String,
+    pub landlord_phone: String,
+    
+    // Tenant
+    pub tenant_name: String,
+    pub tenant_ic: String,
+    pub tenant_address: String,
+    pub tenant_phone: String,
+    
+    // Property & Tenancy Details
+    pub property_address: String,
+    pub term_of_tenancy: String,        // e.g., "2 Years"
+    pub commencement_date: String,
+    pub expiry_date: String,
+    
+    // Financials
+    pub monthly_rental: String,
+    pub rental_deposit: String,         // e.g., "2 Months (RM 3000)"
+    pub utility_deposit: String,        // e.g., "RM 500"
+    pub payment_mode: String,           // e.g., "Maybank 1122334455"
+    
+    // 魂器：Quill 编辑器的底层 HTML 快照
+    pub content_html: String,
+    
+    // 创建时间 (由 SQLite 自动生成并返回)
+    pub created_at: Option<String>,
 }
 
 // ==========================================
@@ -351,6 +388,9 @@ async fn main() {
             telegram::send_to_telegram,
             get_app_config,
             save_app_config,
+            agreement::save_agreement,
+            agreement::get_all_agreements,
+            agreement::get_agreement_by_id,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

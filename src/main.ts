@@ -5,6 +5,8 @@ import { appState, globalVars ,PropertyData} from './state';
 import { initProcessView, loadPropertyIntoProcessView,renderGrid,updateActionBar } from './process';
 import { initPublishView, renderPublishGrid } from './publish';
 import { initSettingView } from './setting';
+import { initAgreementLobby,renderAgreementGrid} from './agreement_lobby';
+//import { hide } from '@tauri-apps/api/app';
 
 // 等待 DOM 加载完成
 document.addEventListener('DOMContentLoaded', () => {
@@ -39,33 +41,28 @@ document.addEventListener('DOMContentLoaded', () => {
   const publishDetailPanel = document.getElementById('publish-detail-panel') as HTMLElement;
   const publishSendBtn = document.getElementById('publish-send-btn') as HTMLButtonElement;
 
+  // agreement view DOM element
+  const agreementView = document.getElementById('agreement-view') as HTMLElement;
+  const agreementEntryButton = document.getElementById('go-agreement-btn') as HTMLButtonElement;
+  const agreementBackButton = document.getElementById('agreement-back-btn') as HTMLButtonElement;
+
    // 当前右侧面板正在看的房源 ID
 
     //process view
   initProcessView();
   initPublishView();
   initSettingView();
+  initAgreementLobby();
 
-  function navigateTo(viewId: 'main' | 'process' | 'publish' | 'settings') {
+  function navigateTo(viewId: 'main' | 'process' | 'publish' | 'settings'|'agreement') {
     // 1. 先把所有页面都藏起来
     mainView?.classList.add('hidden');
     processView?.classList.add('hidden');
     publishView?.classList.add('hidden');
     settingsView?.classList.add('hidden');
+    agreementView?.classList.add('hidden');
 
     // 2. 把想去的页面显示出来
-    if (viewId === 'main') {
-      mainView?.classList.remove('hidden');
-      renderGrid(); // 每次回主页都刷新一下数据
-    } else if (viewId === 'process') {
-      processView?.classList.remove('hidden');
-    } else if (viewId === 'publish') {
-      publishView?.classList.remove('hidden');
-      // TODO: 之后在这里呼叫初始化 Publish 界面的函数
-    } else if (viewId === 'settings') {
-      settingsView?.classList.remove('hidden');
-    }
-
     if (viewId === 'main') {
       mainView?.classList.remove('hidden');
       renderGrid(); 
@@ -84,7 +81,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     } else if (viewId === 'settings') {
       settingsView?.classList.remove('hidden');
+    } else if (viewId === 'agreement') {
+      agreementView?.classList.remove('hidden');
+      renderAgreementGrid();
     }
+    
   }  
   // 主页 -> Settings
   document.getElementById('go-settings-btn')?.addEventListener('click', () => navigateTo('settings'));
@@ -107,6 +108,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Process -> 主页
   document.getElementById('back-to-list-btn')?.addEventListener('click', () => navigateTo('main'));
 
+  // 切换去agreement tab
+  agreementEntryButton?.addEventListener('click', () => {navigateTo('agreement')});
+  agreementBackButton?.addEventListener('click', () => {navigateTo('main')})
 
 
 
@@ -162,16 +166,6 @@ document.addEventListener('DOMContentLoaded', () => {
     renderGrid();
   });
 
-    // 2. 监听原界面的 Process 按钮
- 
-
-  // ==========================================
-  // ✨ Settings 界面逻辑 (Tab 切换与保存)
-  // ==========================================
-
-  // ==========================================
-  // ✨ Publish 界面逻辑 (数据渲染与发送)
-  // ==========================================
 
  
 

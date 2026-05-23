@@ -27,6 +27,9 @@
       <button id="go-publish-btn" class="btn" style="border: none;">
         <i class="ti ti-send"></i> Publish
       </button>
+      <button id="go-agreement-btn" class="btn" style="border: none;">
+        <i class="ti ti-printer"></i> Generate Tendancy Agreement
+      </button>
       <button id="go-settings-btn" class="btn" style="padding: 6px; border: none; background: transparent;">
         <i class="ti ti-settings" style="font-size: 20px;"></i>
       </button>
@@ -244,6 +247,94 @@
       <button id="publish-send-btn" class="btn primary" style="flex: 1; justify-content: center;" disabled>
         <i class="ti ti-send"></i> Send to Telegram
       </button>
+    </div>
+
+  </div>
+</div>
+
+<div id="agreement-view" class="hidden">
+
+  <!-- Header -->
+  <div class="process-header">
+    <div class="process-header-left">
+      <button id="agreement-back-btn" class="back-btn">
+        <i class="ti ti-arrow-left"></i> Back
+      </button>
+      <span class="process-title-label">Tenancy Agreements</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span id="agreement-doc-count" style="font-size:13px;color:var(--text-2);">0 documents</span>
+      <button id="agreement-new-btn"><i class="ti ti-plus"></i> New Agreement</button>
+    </div>
+  </div>
+
+  <!-- Body: doc grid (left) + detail sidebar (right) -->
+  <div class="agreement-body">
+
+    <!-- Left: Document grid -->
+    <div class="agreement-grid-wrap">
+      <div id="agreement-card-grid" class="card-grid">
+
+        <div id="agreement-grid-empty" class="grid-empty">
+          <i class="ti ti-file-off"></i>
+          <span>No agreements yet</span>
+          <span style="font-size:12px;">Click "New Agreement" to draft one</span>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Right: Sidebar detail -->
+    <div class="agreement-sidebar">
+
+      <!-- Empty state -->
+      <div id="agreement-detail-empty" class="agreement-sidebar-empty">
+        <i class="ti ti-file-description"></i>
+        <span>Select a document</span>
+      </div>
+
+      <!-- Filled state (hidden by default) -->
+      <div id="agreement-detail-panel" class="hidden">
+
+        <div class="agreement-sidebar-thumb">
+          <i class="ti ti-file-text"></i>
+        </div>
+
+        <div class="agreement-sidebar-body">
+
+          <div class="field">
+            <span class="field-label">Tenant</span>
+            <span id="agd-tenant" class="field-value">—</span>
+          </div>
+          <div class="field">
+            <span class="field-label">Property</span>
+            <span id="agd-addr" class="field-value">—</span>
+          </div>
+          <div class="field">
+            <span class="field-label">Monthly Rent</span>
+            <span id="agd-rent" class="field-value">—</span>
+          </div>
+          <div class="field">
+            <span class="field-label">Period</span>
+            <span id="agd-period" class="field-value">—</span>
+          </div>
+          <div class="field">
+            <span class="field-label">Last Edited</span>
+            <span id="agd-date" class="field-value">—</span>
+          </div>
+
+        </div>
+
+        <div class="agreement-sidebar-footer">
+          <button id="agreement-open-btn" class="btn primary" style="flex:2;justify-content:center;">
+            <i class="ti ti-edit"></i> Open & Edit
+          </button>
+          <button id="agreement-delete-btn" style="flex:1;justify-content:center;color:#b91c1c;border-color:#fecaca;background:#fef2f2;">
+            <i class="ti ti-trash"></i>
+          </button>
+        </div>
+
+      </div>
     </div>
 
   </div>

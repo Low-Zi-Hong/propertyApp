@@ -19,6 +19,13 @@ Canny Chong (XX)
 Wrtie the shortform of the original agent name beside Canny Chong the name, replacing the (XX) make it like 2 alphabet example:
 Andrew Kan (AK)
 YY Cheah (YY)
+abcd efg (ae)
+
+EXAMPLE:
+🔺 Your Professional Property Agent
+🔺 Trusted Property Investment Specialist
+Canny Chong (YY)
+016-5583820
 
 OUTPUT FORMAT:
 You MUST return strictly a JSON object. Do NOT wrap the JSON in Markdown formatting (no ```json). Do NOT include any conversational text.
