@@ -104,6 +104,12 @@ impl PublisherWorker {
     /// manual `/publish` trigger is armed (Section 24.13).
     pub async fn run(&self, mut shutdown: watch::Receiver<bool>) {
         info!("publisher worker started");
+        if !self.config.app().publisher.enabled {
+            info!(
+                "publisher disabled (MVP mode): skipping Chrome, rate limits and circuit breaker"
+            );
+            return;
+        }
         let mut ticker = tokio::time::interval(POLL_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -123,6 +129,10 @@ impl PublisherWorker {
     /// One poll cycle: gate on pause/circuit + the publish trigger, publish the
     /// oldest `MEDIA_READY` listing if armed, and disarm once the queue is empty.
     async fn tick(&self) -> anyhow::Result<()> {
+        if !self.config.app().publisher.enabled {
+            debug!("publisher disabled (MVP mode): tick skipped");
+            return Ok(());
+        }
         if db::get_flag(&self.pool, STATE_PAUSED).await
             || db::get_flag(&self.pool, STATE_CIRCUIT_OPEN).await
         {
@@ -936,6 +946,11 @@ mod tests {
     }
 
     async fn fixture(dry_run: bool) -> Fixture {
+        fixture_with(dry_run, true).await
+    }
+
+    /// `enabled == false` exercises the MVP manual-publishing bypass (Section 25.2).
+    async fn fixture_with(dry_run: bool, enabled: bool) -> Fixture {
         let (pool, dir) = db::test_support::test_pool().await;
         // The file-backed pool directory doubles as `storage.data_dir`, so the
         // watermarked photos and screenshots land inside the temp dir.
@@ -945,6 +960,7 @@ mod tests {
         app.rate_limit.active_hours_start = "00:00".to_string();
         app.rate_limit.active_hours_end = "23:59".to_string();
         app.publisher.dry_run = dry_run;
+        app.publisher.enabled = enabled;
         let config = Arc::new(ConfigManager::for_test(app));
 
         let bus = EventBus::new();
@@ -1495,6 +1511,48 @@ mod tests {
         assert!(
             !f.driver.opened_urls().is_empty(),
             "an armed tick must drive the publish form"
+        );
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn disabled_publisher_never_drives_the_browser() {
+        let f = fixture_with(false, false).await;
+        seed_media_ready(&f, "L1").await;
+        db::set_state(&f.pool, STATE_PUBLISH_TRIGGER, "true")
+            .await
+            .expect("arm trigger");
+        let mut rx = f.bus.subscribe();
+
+        f.worker.tick().await.expect("disabled tick");
+
+        assert_eq!(
+            f.driver.invocations(),
+            0,
+            "a disabled publisher must never invoke the MarketplaceDriver"
+        );
+        assert!(f.driver.opened_urls().is_empty());
+        assert!(!f.driver.publish_clicked());
+        assert_eq!(status(&f, "L1").await, "MEDIA_READY");
+        assert!(
+            db::get_flag(&f.pool, STATE_PUBLISH_TRIGGER).await,
+            "the disabled tick must leave the publish trigger untouched"
+        );
+        assert!(
+            !db::get_flag(&f.pool, STATE_CIRCUIT_OPEN).await,
+            "a disabled publisher must never trip the circuit breaker"
+        );
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, DaemonEvent::CircuitBreakerTripped { .. })),
+            "no CircuitBreakerTripped event may be published in MVP mode: {events:?}"
         );
 
         db::test_support::cleanup(f.pool, f.dir).await;

@@ -247,6 +247,10 @@ pub struct RateLimitConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PublisherConfig {
+    /// `false` = MVP manual-publishing mode: the daemon never drives Chrome
+    /// (Section 25.1).
+    #[serde(default = "default_publisher_enabled")]
+    pub enabled: bool,
     pub chrome_path: String,
     pub user_data_dir: String,
     pub cdp_port: u16,
@@ -263,6 +267,10 @@ pub struct PublisherConfig {
     pub sale_create_url: String,
     #[serde(default = "default_rent_create_url")]
     pub rent_create_url: String,
+}
+
+fn default_publisher_enabled() -> bool {
+    true
 }
 
 fn default_max_crosspost_groups() -> u32 {
@@ -1197,6 +1205,20 @@ mod tests {
         assert!(!config.publisher.rent_create_url.trim().is_empty());
         assert_eq!(config.gc.retention_days, 7);
         assert_eq!(config.supervisor.circuit_breaker_cooldown_min, 30);
+    }
+
+    #[test]
+    fn publisher_enabled_defaults_to_true_and_parses_false() {
+        let defaulted =
+            AppConfig::from_toml_str("[publisher]\ndry_run = true\n").expect("parse defaulted");
+        assert!(
+            defaulted.publisher.enabled,
+            "publisher.enabled must default to true when absent"
+        );
+
+        let disabled =
+            AppConfig::from_toml_str("[publisher]\nenabled = false\n").expect("parse disabled");
+        assert!(!disabled.publisher.enabled, "enabled = false must parse");
     }
 
     #[test]

@@ -12,7 +12,7 @@ use crate::config::{AppConfig, ConfigManager};
 use crate::db::{self, QueueCounts, STATE_CIRCUIT_OPEN, STATE_PAUSED, STATE_PUBLISH_TRIGGER};
 use crate::telegram::client::{TelegramClient, Update};
 use crate::telegram::escape_html;
-use crate::telegram::reactions::REACTION_MEDIA_READY;
+use crate::telegram::reactions::{REACTION_MEDIA_READY, REACTION_PUBLISHED};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -25,6 +25,7 @@ pub enum Command {
     Clear,
     Publish,
     Retry,
+    Done,
 }
 
 impl Command {
@@ -55,6 +56,7 @@ impl Command {
             "clear" => Command::Clear,
             "publish" => Command::Publish,
             "retry" => Command::Retry,
+            "done" => Command::Done,
             _ => return None,
         };
         Some((command, parts.next().map(|arg| arg.to_string())))
@@ -71,6 +73,7 @@ impl Command {
             Command::Clear => "/clear",
             Command::Publish => "/publish",
             Command::Retry => "/retry",
+            Command::Done => "/done",
         }
     }
 }
@@ -142,6 +145,7 @@ impl CommandRouter {
         .await?;
         let paused = db::get_flag(&self.pool, STATE_PAUSED).await;
         let circuit_open = db::get_flag(&self.pool, STATE_CIRCUIT_OPEN).await;
+        let publisher_enabled = app.publisher.enabled;
         // `/start` and `/resume` only clear the circuit once the account-risk
         // cooldown has elapsed (Section 24.10).
         let cooldown_remaining = if circuit_open {
@@ -173,6 +177,9 @@ impl CommandRouter {
         // anchor reaction can be reset once the transaction commits.
         let mut arm_publish = false;
         let mut restored_ids: Vec<String> = Vec::new();
+        // `/done` remembers the listing it just marked published so the anchor
+        // reaction can be set after the cursor transaction commits.
+        let mut completed_id: Option<String> = None;
         let reply: String = match command {
             Command::Start => {
                 new_paused = Some(false);
@@ -207,7 +214,15 @@ impl CommandRouter {
                     "Resumed.".to_string()
                 }
             }
-            Command::Status => status_reply(paused, circuit_open, &counts, hourly, daily, &app)?,
+            Command::Status => status_reply(
+                paused,
+                circuit_open,
+                &counts,
+                hourly,
+                daily,
+                &app,
+                publisher_enabled,
+            )?,
             Command::Help => help_reply(),
             Command::Reload => match self.config.reload() {
                 Ok(_) => "Reloaded.".to_string(),
@@ -222,8 +237,13 @@ impl CommandRouter {
             }
             Command::Publish => {
                 // Manual trigger (Section 24.13): never arm while the circuit is
-                // open; the admin must force-resume first (Section 24.17).
-                if circuit_open {
+                // open; the admin must force-resume first (Section 24.17). In MVP
+                // manual-publishing mode the auto-publisher is off entirely
+                // (Section 25.3), so check that before the circuit gate.
+                if !publisher_enabled {
+                    "Auto-publisher is disabled (MVP mode). Copy the preview album & text above to post manually, then send /done to mark it published."
+                        .to_string()
+                } else if circuit_open {
                     "Cannot publish: circuit breaker is OPEN (cooldown active). Send /resume force to bypass."
                         .to_string()
                 } else if counts.media_ready > 0 {
@@ -244,6 +264,20 @@ impl CommandRouter {
                 } else {
                     "No listings in NEEDS_INTERVENTION.".to_string()
                 }
+            }
+            Command::Done => {
+                // Manual publishing (Section 25.4): `complete_listing` commits its
+                // own transaction, then the cursor is committed below as usual.
+                let completed = db::complete_listing(&self.pool, arg.as_deref()).await?;
+                let reply = match &completed {
+                    Some(id) => format!("Marked {id} as PUBLISHED \u{1f389}."),
+                    None => match arg.as_deref() {
+                        Some(id) => format!("Listing {id} is not MEDIA_READY or was not found."),
+                        None => "No MEDIA_READY listing to mark published.".to_string(),
+                    },
+                };
+                completed_id = completed;
+                reply
             }
         };
 
@@ -294,6 +328,25 @@ impl CommandRouter {
                     error = %err,
                     "cannot restore the MEDIA_READY reaction after /retry"
                 );
+            }
+        }
+
+        // `/done` marked a listing published by hand: stamp the anchor reaction
+        // with the party-popper, best-effort after the commit (Section 25.3).
+        if let Some(listing_id) = &completed_id {
+            if let Some((reaction_chat_id, anchor)) = self.reaction_anchor(listing_id).await {
+                if let Err(err) = client
+                    .set_message_reaction(reaction_chat_id, anchor, REACTION_PUBLISHED)
+                    .await
+                {
+                    warn!(
+                        listing_id = %listing_id,
+                        chat_id = reaction_chat_id,
+                        anchor,
+                        error = %err,
+                        "cannot set the PUBLISHED reaction after /done"
+                    );
+                }
             }
         }
 
@@ -417,12 +470,33 @@ fn status_reply(
     hourly: i64,
     daily: i64,
     app: &AppConfig,
+    publisher_enabled: bool,
 ) -> anyhow::Result<String> {
+    let status = format!("Status: {}", if paused { "PAUSED" } else { "RUNNING" });
+    if !publisher_enabled {
+        // MVP manual-publishing mode (Section 25.3): quota, circuit and publish
+        // window do not apply, so those lines are omitted entirely.
+        return Ok([
+            status,
+            format!(
+                "Queue: INGESTED {}, ENRICHED {}, MEDIA_READY {}, PUBLISHED {}, NEEDS_INTERVENTION {}",
+                counts.ingested,
+                counts.enriched,
+                counts.media_ready,
+                counts.published,
+                counts.needs_intervention
+            ),
+            format!("Queue depth: {}", counts.depth()),
+            "Publisher: DISABLED (MVP mode)".to_string(),
+        ]
+        .join("\n"));
+    }
+
     let remaining_hourly = (i64::from(app.rate_limit.max_per_hour) - hourly).max(0);
     let remaining_daily = (i64::from(app.rate_limit.max_per_24h) - daily).max(0);
     let window = app.rate_limit.window_summary()?;
     let lines = [
-        format!("Status: {}", if paused { "PAUSED" } else { "RUNNING" }),
+        status,
         format!(
             "Queue: INGESTED {}, ENRICHED {}, MEDIA_READY {}, PUBLISHED {}, NEEDS_INTERVENTION {}",
             counts.ingested,
@@ -460,6 +534,7 @@ fn help_reply() -> String {
         "/clear - delete all pending (non-PUBLISHED) listings and their media",
         "/publish - publish the MEDIA_READY queue (blocked while the circuit is OPEN)",
         "/retry - move NEEDS_INTERVENTION listings back to MEDIA_READY",
+        "/done - mark a listing manually published (optional listing id)",
     ]
     .join("\n")
 }
@@ -541,6 +616,7 @@ mod tests {
         assert_eq!(Command::parse("/reload now"), Some(Command::Reload));
         assert_eq!(Command::parse("/publish"), Some(Command::Publish));
         assert_eq!(Command::parse("/retry L123"), Some(Command::Retry));
+        assert_eq!(Command::parse("/done"), Some(Command::Done));
         assert_eq!(Command::parse("hello"), None);
         assert_eq!(Command::parse("/nonsense"), None);
 
@@ -559,6 +635,10 @@ mod tests {
         assert_eq!(
             Command::parse_with_arg("/resume force"),
             Some((Command::Resume, Some("force".to_string())))
+        );
+        assert_eq!(
+            Command::parse_with_arg("/done L123"),
+            Some((Command::Done, Some("L123".to_string())))
         );
     }
 
@@ -1248,6 +1328,167 @@ mod tests {
             .await
             .expect("status");
         assert_eq!(status, "NEEDS_INTERVENTION");
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn done_marks_the_oldest_media_ready_published() {
+        let f = fixture().await;
+        seed_listing(&f, "L-OLD", "MEDIA_READY", Some("old copy")).await;
+        seed_listing(&f, "L-NEW", "MEDIA_READY", Some("new copy")).await;
+        let now = db::now_ms();
+        sqlx::query("UPDATE listings SET media_ready_at = ? WHERE id = 'L-OLD'")
+            .bind(now - 60_000)
+            .execute(&f.pool)
+            .await
+            .expect("backdate L-OLD");
+        sqlx::query("UPDATE listings SET media_ready_at = ? WHERE id = 'L-NEW'")
+            .bind(now)
+            .execute(&f.pool)
+            .await
+            .expect("stamp L-NEW");
+
+        let outcome = f
+            .router
+            .handle(&f.client, &update_fixture(40, 42, "/done"))
+            .await
+            .expect("handle");
+
+        assert_eq!(
+            reply_of(outcome),
+            "Marked L-OLD as PUBLISHED \u{1f389}.".to_string()
+        );
+
+        let (status, published_at): (String, Option<i64>) =
+            sqlx::query_as("SELECT status, published_at FROM listings WHERE id = 'L-OLD'")
+                .fetch_one(&f.pool)
+                .await
+                .expect("L-OLD row");
+        assert_eq!(status, "PUBLISHED");
+        assert!(published_at.is_some(), "published_at must be set for M6 GC");
+
+        let newer_status: String =
+            sqlx::query_scalar("SELECT status FROM listings WHERE id = 'L-NEW'")
+                .fetch_one(&f.pool)
+                .await
+                .expect("L-NEW status");
+        assert_eq!(newer_status, "MEDIA_READY", "only the oldest row is marked");
+
+        let audit: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM supervisor_events
+             WHERE event_type = 'MANUAL_PUBLISHED' AND severity = 'INFO' AND listing_id = 'L-OLD'",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .expect("audit count");
+        assert_eq!(audit, 1, "one MANUAL_PUBLISHED audit row expected");
+
+        assert!(
+            f.client
+                .reactions()
+                .contains(&(42, 10, "\u{1f389}".to_string())),
+            "the anchor reaction must become PUBLISHED: {:?}",
+            f.client.reactions()
+        );
+        assert_eq!(db::get_cursor(&f.pool).await.expect("cursor"), 40);
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn done_rejects_non_media_ready_or_missing_ids() {
+        let f = fixture().await;
+        seed_listing(&f, "L1", "PUBLISHED", Some("x")).await;
+
+        let outcome = f
+            .router
+            .handle(&f.client, &update_fixture(41, 42, "/done L1"))
+            .await
+            .expect("handle");
+        assert_eq!(
+            reply_of(outcome),
+            "Listing L1 is not MEDIA_READY or was not found.".to_string()
+        );
+
+        let outcome = f
+            .router
+            .handle(&f.client, &update_fixture(42, 42, "/done L-MISSING"))
+            .await
+            .expect("handle");
+        assert_eq!(
+            reply_of(outcome),
+            "Listing L-MISSING is not MEDIA_READY or was not found.".to_string()
+        );
+
+        let outcome = f
+            .router
+            .handle(&f.client, &update_fixture(43, 42, "/done"))
+            .await
+            .expect("handle");
+        assert_eq!(
+            reply_of(outcome),
+            "No MEDIA_READY listing to mark published.".to_string()
+        );
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn status_reports_disabled_publisher_in_mvp_mode() {
+        let mut config = test_app_config();
+        config.publisher.enabled = false;
+        let f = fixture_with(config).await;
+
+        let outcome = f
+            .router
+            .handle(&f.client, &update_fixture(44, 42, "/status"))
+            .await
+            .expect("handle");
+        let reply = reply_of(outcome);
+
+        assert!(reply.contains("Status: RUNNING"));
+        assert!(reply.contains("Queue: INGESTED 0"));
+        assert!(reply.contains("Queue depth: 0"));
+        assert!(reply.contains("Publisher: DISABLED (MVP mode)"));
+        assert!(
+            !reply.contains("Quota:"),
+            "quota line must be omitted: {reply}"
+        );
+        assert!(
+            !reply.contains("Circuit:"),
+            "circuit line must be omitted: {reply}"
+        );
+        assert!(
+            !reply.contains("Publish window:"),
+            "publish-window line must be omitted: {reply}"
+        );
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn publish_replies_mvp_notice_and_never_arms_when_disabled() {
+        let mut config = test_app_config();
+        config.publisher.enabled = false;
+        let f = fixture_with(config).await;
+        seed_listing(&f, "L1", "MEDIA_READY", Some("x")).await;
+
+        let outcome = f
+            .router
+            .handle(&f.client, &update_fixture(45, 42, "/publish"))
+            .await
+            .expect("handle");
+
+        assert_eq!(
+            reply_of(outcome),
+            "Auto-publisher is disabled (MVP mode). Copy the preview album & text above to post manually, then send /done to mark it published."
+                .to_string()
+        );
+        assert!(
+            !db::get_flag(&f.pool, STATE_PUBLISH_TRIGGER).await,
+            "/publish must never arm the trigger in MVP mode"
+        );
 
         db::test_support::cleanup(f.pool, f.dir).await;
     }

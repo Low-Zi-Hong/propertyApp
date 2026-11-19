@@ -227,6 +227,62 @@ pub async fn retry_needs_intervention(
     Ok((ids.len() as i64, ids))
 }
 
+/// `/done` (Section 25.4): mark one `MEDIA_READY` listing `PUBLISHED` by hand.
+///
+/// Resolves the target and performs the guarded transition inside one
+/// transaction, audit row included. `published_at` is always stamped so the M6
+/// GC can purge the media folder on schedule. Returns the completed id, or
+/// `None` when no eligible row matched.
+pub async fn complete_listing(
+    pool: &SqlitePool,
+    listing_id: Option<&str>,
+) -> Result<Option<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let target: Option<String> = match listing_id {
+        Some(id) => {
+            sqlx::query_scalar("SELECT id FROM listings WHERE id = ? AND status = 'MEDIA_READY'")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+        }
+        None => {
+            sqlx::query_scalar(
+                "SELECT id FROM listings WHERE status = 'MEDIA_READY'
+                 ORDER BY media_ready_at ASC, id ASC LIMIT 1",
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+        }
+    };
+
+    let Some(id) = target else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+
+    let now = now_ms();
+    let result = sqlx::query(
+        "UPDATE listings
+         SET status = 'PUBLISHED', published_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'MEDIA_READY'",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        tx.commit().await?;
+        return Ok(None);
+    }
+
+    let detail = serde_json::json!({ "published_by": "/done" }).to_string();
+    record_supervisor_event_tx(&mut tx, Some(&id), "MANUAL_PUBLISHED", "INFO", &detail).await?;
+    tx.commit().await?;
+    Ok(Some(id))
+}
+
 // --- daemon_state ----------------------------------------------------------
 
 pub async fn get_state(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {

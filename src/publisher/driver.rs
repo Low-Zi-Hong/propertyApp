@@ -106,6 +106,7 @@ struct FakeCalls {
     screenshots: Vec<PathBuf>,
     risk_checks: usize,
     discarded_drafts: usize,
+    invocations: usize,
 }
 
 /// Scripted, in-memory `MarketplaceDriver` for the worker tests.
@@ -228,6 +229,11 @@ impl FakeMarketplaceDriver {
         self.calls().discarded_drafts
     }
 
+    /// Total number of driver calls the worker made (any operation).
+    pub fn invocations(&self) -> usize {
+        self.calls().invocations
+    }
+
     fn calls(&self) -> std::sync::MutexGuard<'_, FakeCalls> {
         self.calls
             .lock()
@@ -235,7 +241,9 @@ impl FakeMarketplaceDriver {
     }
 
     fn record<R>(&self, update: impl FnOnce(&mut FakeCalls) -> R) -> R {
-        update(&mut self.calls())
+        let mut calls = self.calls();
+        calls.invocations += 1;
+        update(&mut calls)
     }
 
     /// One-shot selector failure, consumed by the next form interaction.

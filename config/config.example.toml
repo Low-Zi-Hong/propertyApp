@@ -58,6 +58,7 @@ active_hours_end = "23:00"
 timezone = "Asia/Kuala_Lumpur"
 
 [publisher]
+enabled = true                  # false = MVP manual-publishing mode; no Chrome is launched
 chrome_path = ""
 user_data_dir = "data/chrome-profile"
 cdp_port = 9222

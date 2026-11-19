@@ -1204,3 +1204,76 @@ Supersedes the `/resume` cooldown rule of Section 24.10.4 for the explicit force
    When the circuit is closed the Section 24.13 behaviour is unchanged (arm only when
    `MEDIA_READY > 0`).
 4. Both commands stay admin-gated; the cursor still advances in the router transaction.
+
+---
+
+## 25. Milestone 5 - MVP Manual-Publishing Mode (build contract)
+
+**Scope:** add a `[publisher] enabled` toggle that turns `propbotd` into a manual
+(hand-posting) MVP **without deleting any M4 publisher code**. When `enabled = false`,
+the daemon still ingests, enriches, watermarks, previews and tracks listings - it just
+never drives Chrome; the operator posts to Facebook by hand and marks each listing done.
+
+### 25.1 Config (`src/config.rs`, `config/config.example.toml`, `config/config.toml`)
+
+- `PublisherConfig` gains `pub enabled: bool` with
+  `#[serde(default = "default_publisher_enabled")]` and
+  `fn default_publisher_enabled() -> bool { true }`.
+- `config/config.example.toml` documents `enabled = true` under `[publisher]`
+  (comment: `false = MVP manual-publishing mode; no Chrome is launched`).
+- `config/config.toml` sets `enabled = false` (MVP mode active immediately).
+- No validation change: a `bool` needs none.
+
+### 25.2 Publisher bypass (`src/publisher/worker.rs`)
+
+- `PublisherWorker::run` reads `self.config.app().publisher.enabled` immediately after
+  the `"publisher worker started"` log. When `false` it logs
+  `"publisher disabled (MVP mode): skipping Chrome, rate limits and circuit breaker"`
+  and returns without touching the driver, CDP, active-hours, rate limiter or breaker.
+- Defense-in-depth: `PublisherWorker::tick` also early-returns when `enabled == false`,
+  so `publish_one`/`drive` can never run while disabled. `ChromeCdpDriver` stays lazy
+  (it only spawns Chrome from `drive`), so the guard is sufficient to never launch Chrome.
+
+### 25.3 Router (`src/telegram/router.rs`)
+
+- `Command` gains `Done` (`"done"` in `parse_with_arg`, `"/done"` in `as_str`).
+- `/status` -> `status_reply(..., publisher_enabled)`; when `enabled == false` the reply is
+  `Status: RUNNING|PAUSED`, the queue lines, then exactly `Publisher: DISABLED (MVP mode)`
+  - the Quota/Circuit/Publish-window lines are omitted.
+- `/publish` when `enabled == false` (checked before the circuit check) replies **exactly**:
+  `Auto-publisher is disabled (MVP mode). Copy the preview album & text above to post manually, then send /done to mark it published.`
+  and never arms `STATE_PUBLISH_TRIGGER`.
+- `/done [listing_id]` (admin-gated like every command):
+  - calls `db::complete_listing` (own transaction) then commits the cursor in the router
+    transaction as usual; sets the anchor reaction to the party-popper (`REACTION_PUBLISHED`)
+    best-effort after commit (same pattern as `/retry`).
+  - reply on success: `Marked {id} as PUBLISHED (party-popper).`
+  - reply when an explicit id is not `MEDIA_READY`/not found:
+    `Listing {id} is not MEDIA_READY or was not found.`
+  - reply when no id and nothing `MEDIA_READY`: `No MEDIA_READY listing to mark published.`
+- `help_reply` adds: `/done - mark a listing manually published (optional listing id)`.
+
+### 25.4 `db::complete_listing` (`src/db.rs`)
+
+`pub async fn complete_listing(pool: &SqlitePool, listing_id: Option<&str>) -> Result<Option<String>, sqlx::Error>`
+- Resolves the target inside one transaction:
+  - `Some(id)`: `SELECT id FROM listings WHERE id = ? AND status = 'MEDIA_READY'`.
+  - `None`: `SELECT id FROM listings WHERE status = 'MEDIA_READY' ORDER BY media_ready_at ASC, id ASC LIMIT 1`.
+- On a hit, `UPDATE listings SET status = 'PUBLISHED', published_at = ?, updated_at = ? WHERE id = ? AND status = 'MEDIA_READY'`
+  (guarded update), records `MANUAL_PUBLISHED` / `INFO` via `record_supervisor_event_tx`
+  (detail `{"published_by":"/done"}`), commits, returns `Some(id)`.
+- Returns `None` when no eligible row matches. `published_at` MUST be set so M6 GC can
+  purge the media folder on schedule.
+
+### 25.5 Acceptance criteria
+
+1. `publisher.enabled` defaults to `true` when absent; `false` parses.
+2. `enabled == false` -> the worker never invokes the `MarketplaceDriver`, never emits
+   `CircuitBreakerTripped`, and leaves listings `MEDIA_READY` (unit-tested with
+   `FakeMarketplaceDriver` + `EventBus`).
+3. `/done` transitions `MEDIA_READY -> PUBLISHED` with `published_at` set, records a
+   `MANUAL_PUBLISHED` audit row, and updates the anchor reaction to `REACTION_PUBLISHED`.
+4. `/done` with no id selects the **oldest** `MEDIA_READY` (by `media_ready_at`).
+5. `/status` (disabled) shows `Publisher: DISABLED (MVP mode)` and omits
+   Quota/Circuit/window lines; `/publish` (disabled) replies the exact MVP string.
+6. `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` all pass.
