@@ -81,3 +81,9 @@ dry_run = false
 [supervisor]
 telegram_admin_chat_id = 0
 circuit_breaker_cooldown_min = 30
+
+[devops]
+admin_chat_id = 0             # 0 = disabled; set to your personal chat id
+console_enabled = true        # enables the /console OpenCode self-maintenance command
+opencode_bin = "opencode"     # executable used by /console
+log_buffer_lines = 200        # in-memory ring buffer exposed by /log

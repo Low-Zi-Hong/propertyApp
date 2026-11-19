@@ -1445,3 +1445,92 @@ plus `media.perturb_crop_px` and `media.perturb_brightness`. Stop reading
    bottom-left corner without touching centre pixels; opacity blends correctly.
 4. Text/font watermark code and its two dependencies are removed; `cargo fmt --check`,
    `cargo test`, `cargo clippy --all-targets -- -D warnings` all pass.
+
+---
+
+## 28. Milestone 8 - v1.0 remote DevOps observability + self-maintenance (build contract)
+
+**Scope:** remote log viewing, lifecycle notifications, /restart and /console self-repair,
+gated strictly to one admin. Persistence-first rules stay: nothing load-bearing lives only
+in memory (the ring buffer is observability-only, not state).
+
+### 28.1 Config (src/config.rs, config/config.example.toml, config/config.toml)
+
+New `DevOpsConfig` (field `pub devops: DevOpsConfig` on `AppConfig`, `#[serde(default)]`):
+- `admin_chat_id: Option of i64` - personal chat for alerts; `None` disables all devops
+  notifications and the three self-maintenance commands.
+- `console_enabled: bool` - default `true`.
+- `opencode_bin: String` - default `"opencode"`.
+- `log_buffer_lines: usize` - default `200`.
+Validation: `log_buffer_lines` must be at least 1. Document `[devops]` in both TOML files.
+Update `test_app_config` and any `AppConfig` literal for the new field.
+
+### 28.2 Logging (src/logging.rs, new module; wired in src/main.rs)
+
+- `LogBuffer` (Mutex of VecDeque of String + capacity): `push(line)` truncates to capacity;
+  `recent(n)` returns the newest n lines in chronological order. Global via `OnceLock`.
+- `chunk_for_telegram(lines)`: join with newline, split into chunks of at most 4000 chars
+  (pure, unit-tested).
+- `ErrorAlerter`: optional sink (Arc TelegramClient + admin chat id) and a per-target
+  last-sent map; `should_alert(target)` enforces a 60s dedup window; `try_send(target, text)`
+  spawns a tokio task to `send_message` the alert `🚨 [ERROR] target: message` and marks the
+  target. The sink is set post-init (may be None early on, in which case alerts are dropped).
+  Unit-test dedup with an injectable window.
+- Custom `tracing_subscriber` layer (Registry + three layers): stdout fmt; a writer that
+  appends each formatted line to the active file `data/logs/propbotd.log` AND the ring
+  buffer, with a daily roll that renames the active file to
+  `data/logs/propbotd-YYYYMMDD.log` at UTC midnight; and an `on_event` layer that forwards
+  `Level::ERROR` events to `ErrorAlerter::try_send` (target = event target, message = event
+  message field).
+- GC worker prunes `data/logs/propbotd-*.log` older than `gc.retention_days`.
+
+### 28.3 Lifecycle notifications (src/main.rs)
+
+- After DB + Telegram client init: if `devops.admin_chat_id` is set, send
+  `🟢 propbotd v0.1.0 is ONLINE (host: HOSTNAME, mode: MVP-or-AUTO).` (mode = MVP when
+  `publisher.enabled == false`, else AUTO; hostname from COMPUTERNAME/HOSTNAME env).
+- On shutdown signal (Ctrl+C; also SIGTERM where supported): send
+  `🔴 propbotd is SHUTTING DOWN.` with a 5s timeout before tearing down the runtime.
+
+### 28.4 Commands (src/telegram/router.rs)
+
+New `Command::{Log, Restart, Console}`. These three are gated by
+`devops_authorized(app, sender_id)` = `app.devops.admin_chat_id == Some(sender_id)`; any other
+sender is rejected immediately (cursor advanced, no action). Existing commands keep the
+existing `authorized()` gate.
+
+- `/log [N]`: N defaults 30, clamped to 100; read `logging::log_buffer().recent(N)`, chunk via
+  `chunk_for_telegram`, send each chunk as its own message; if empty, send
+  `"No log lines yet."`.
+- `/restart`: reply `🔄 Restarting propbotd...`, then spawn DETACHED
+  `scripts/remote_rebuild.ps1 -SkipBuild -BotToken TOKEN -AdminChatId ID -Pid SELF_PID`
+  (hidden PowerShell, DETACHED_PROCESS on Windows). No build step.
+- `/console INSTRUCTION` (requires `console_enabled`): reply `🛠️ Running OpenCode task...`;
+  run `opencode_bin run PROMPT` in the repo root (10-minute timeout) where PROMPT tells
+  OpenCode to follow `docs/ARCHITECTURE.md` and execute INSTRUCTION; capture stdout+stderr;
+  then `git status --porcelain`:
+  - no modified files -> reply with the truncated output summary.
+  - modified files -> reply summary + `🔨 Code changed - running cargo test and rebuild, restarting shortly...`
+    and spawn the detached `scripts/remote_rebuild.ps1` (WITH build: stops propbotd, runs
+    `cargo test` + `cargo build --release`, reports build failure to Telegram via Bot API,
+    and launches the updated binary on success).
+
+### 28.5 scripts/remote_rebuild.ps1 (new file)
+
+Params: `-SkipBuild` (switch), `-BotToken`, `-AdminChatId`, `-Pid`, `-RepoRoot`,
+`-Binary` (default `target/release/propbotd.exe`). Flow: wait 2s; stop process `-Pid` (and
+any propbotd binary) unless SkipBuild; if building: run `cargo test` then
+`cargo build --release`, on failure POST a message to the Telegram Bot API sendMessage
+endpoint and exit WITHOUT restarting; on success (or SkipBuild) Start-Process the binary from
+`-RepoRoot` so the daemon relaunches and sends the `🟢 ONLINE` message.
+
+### 28.6 Acceptance criteria
+
+1. `[devops]` parses with the documented defaults; `log_buffer_lines = 0` is rejected.
+2. `/log`, `/restart`, `/console` are rejected for any sender not equal to
+   `devops.admin_chat_id` (unit-tested with the router fixture); `/console` no-ops when
+   `console_enabled == false`.
+3. `LogBuffer` + `chunk_for_telegram` + `ErrorAlerter` dedup are unit-tested.
+4. Startup/shutdown notifications fire only when `devops.admin_chat_id` is set.
+5. `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` all pass.
+   (Subprocess spawning and the PowerShell script are integration-level, not unit-tested.)

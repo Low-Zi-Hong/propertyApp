@@ -3,7 +3,9 @@
 //! All commands are admin-gated, persist their side effects and the Telegram
 //! cursor in one transaction, then answer with the contract reply shape.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use sqlx::SqlitePool;
 use tracing::{info, warn};
@@ -26,6 +28,9 @@ pub enum Command {
     Publish,
     Retry,
     Done,
+    Log,
+    Restart,
+    Console,
 }
 
 impl Command {
@@ -38,13 +43,18 @@ impl Command {
         Self::parse_with_arg(text).map(|(command, _arg)| command)
     }
 
-    /// Like [`Command::parse`] but also captures the first whitespace argument,
-    /// e.g. `/retry <listing_id>` (Section 24.14).
+    /// Like [`Command::parse`] but also captures the argument (Section 24.14).
+    ///
+    /// Most commands take a single token (`/retry <listing_id>`,
+    /// `/done <id>`, `/resume force`); `/console` keeps the entire remaining
+    /// instruction, so `/console fix the null deref bug` yields the full
+    /// `"fix the null deref bug"` (Section 28.4).
     pub fn parse_with_arg(text: &str) -> Option<(Self, Option<String>)> {
         let trimmed = text.trim();
         let rest = trimmed.strip_prefix('/')?;
-        let mut parts = rest.split_whitespace();
-        let head = parts.next()?;
+        let rest = rest.trim_start();
+        let head_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let head = &rest[..head_len];
         let name = head.split('@').next().unwrap_or(head).to_ascii_lowercase();
         let command = match name.as_str() {
             "start" => Command::Start,
@@ -57,9 +67,22 @@ impl Command {
             "publish" => Command::Publish,
             "retry" => Command::Retry,
             "done" => Command::Done,
+            // DevOps self-maintenance commands (Section 28.4); gated separately
+            // by `devops_authorized`.
+            "log" => Command::Log,
+            "restart" => Command::Restart,
+            "console" => Command::Console,
             _ => return None,
         };
-        Some((command, parts.next().map(|arg| arg.to_string())))
+        let tokens: Vec<&str> = rest[head_len..].split_whitespace().collect();
+        let arg = if tokens.is_empty() {
+            None
+        } else if matches!(command, Command::Console) {
+            Some(tokens.join(" "))
+        } else {
+            Some(tokens[0].to_string())
+        };
+        Some((command, arg))
     }
 
     pub fn as_str(self) -> &'static str {
@@ -74,6 +97,9 @@ impl Command {
             Command::Publish => "/publish",
             Command::Retry => "/retry",
             Command::Done => "/done",
+            Command::Log => "/log",
+            Command::Restart => "/restart",
+            Command::Console => "/console",
         }
     }
 }
@@ -103,9 +129,13 @@ impl CommandRouter {
     }
 
     /// Dispatch one update. Commands are idempotent, so re-delivery is harmless.
+    ///
+    /// Takes the shared `Arc` (not `&dyn`) because `/console` hands a clone of
+    /// the transport to a detached task so the poll loop never blocks
+    /// (Section 28.4).
     pub async fn handle(
         &self,
-        client: &dyn TelegramClient,
+        client: &Arc<dyn TelegramClient>,
         update: &Update,
     ) -> anyhow::Result<CommandOutcome> {
         let Some(message) = update.message.as_ref() else {
@@ -122,7 +152,17 @@ impl CommandRouter {
         let sender_id = message.sender_id();
         let chat_id = message.chat.id;
 
-        if !authorized(&app, sender_id, chat_id) {
+        // DevOps commands (`/log`, `/restart`, `/console`) are gated to the
+        // single `[devops].admin_chat_id` and deliberately bypass the broader
+        // command allowlist; every other command keeps the `authorized()` gate
+        // (Section 28.4). On rejection the cursor advances and nothing is sent.
+        let is_devops = matches!(command, Command::Log | Command::Restart | Command::Console);
+        let permitted = if is_devops {
+            devops_authorized(&app, sender_id)
+        } else {
+            authorized(&app, sender_id, chat_id)
+        };
+        if !permitted {
             warn!(
                 sender_id,
                 chat_id,
@@ -278,6 +318,56 @@ impl CommandRouter {
                 };
                 completed_id = completed;
                 reply
+            }
+            Command::Log => {
+                let requested = arg
+                    .as_deref()
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(DEVLOG_DEFAULT_LINES);
+                let count = requested.clamp(1, DEVLOG_MAX_LINES);
+                let lines = crate::logging::log_buffer().recent(count);
+                if lines.is_empty() {
+                    "No log lines yet.".to_string()
+                } else {
+                    // The single reply field cannot carry 4000+ characters, so
+                    // the chunks go directly through `send_plain_text` (in
+                    // order) and the reply is only a short confirmation.
+                    for chunk in crate::logging::chunk_for_telegram(&lines) {
+                        if let Err(err) = client.send_plain_text(chat_id, &chunk).await {
+                            warn!(error = %err, "cannot deliver a /log chunk");
+                            break;
+                        }
+                    }
+                    format!("Sent {} log line(s).", lines.len())
+                }
+            }
+            Command::Restart => {
+                // Detached helper: it waits, stops this process and relaunches
+                // the current binary without a rebuild (Section 28.4).
+                spawn_detached_powershell(&remote_rebuild_args(&app, true));
+                "🔄 Restarting propbotd...".to_string()
+            }
+            Command::Console => {
+                if !app.devops.console_enabled {
+                    "Console is disabled.".to_string()
+                } else if let Some(instruction) = arg.as_deref() {
+                    // OpenCode can run for up to 10 minutes: hand the whole job
+                    // to a detached task so `getUpdates`/ingest/other commands
+                    // keep flowing. The router replies with the ack immediately;
+                    // the task delivers the summary (and rebuild) itself
+                    // (Section 28.4).
+                    tokio::spawn(run_console_job(ConsoleJob {
+                        config: Arc::clone(&self.config),
+                        client: Arc::clone(client),
+                        chat_id,
+                        instruction: instruction.to_string(),
+                        repo_root: repo_root(),
+                        pid: std::process::id(),
+                    }));
+                    "🛠️ Running OpenCode task...".to_string()
+                } else {
+                    "Usage: /console <instruction>".to_string()
+                }
             }
         };
 
@@ -436,6 +526,251 @@ fn authorized(app: &AppConfig, sender_id: i64, chat_id: i64) -> bool {
     admin != 0 && chat_id == admin
 }
 
+/// The three self-maintenance commands are gated to the single devops admin
+/// chat (Section 28.4), independently of the broader command allowlist.
+fn devops_authorized(app: &AppConfig, sender_id: i64) -> bool {
+    app.devops.admin_chat_id == Some(sender_id)
+}
+
+/// `/log` page size defaults and cap (Section 28.4).
+const DEVLOG_DEFAULT_LINES: usize = 30;
+const DEVLOG_MAX_LINES: usize = 100;
+/// `/console` wall-clock budget and Telegram summary budget.
+const CONSOLE_TIMEOUT: Duration = Duration::from_secs(600);
+const CONSOLE_SUMMARY_CHARS: usize = 3800;
+
+fn repo_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn release_binary(repo_root: &Path) -> PathBuf {
+    repo_root
+        .join("target")
+        .join("release")
+        .join(format!("propbotd{}", std::env::consts::EXE_SUFFIX))
+}
+
+fn running_binary(repo_root: &Path) -> PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| release_binary(repo_root))
+}
+
+fn devops_chat_arg(app: &AppConfig) -> String {
+    app.devops
+        .admin_chat_id
+        .map(|chat_id| chat_id.to_string())
+        .unwrap_or_default()
+}
+
+/// `scripts/remote_rebuild.ps1` arguments: `-SkipBuild` for `/restart`, a full
+/// `cargo test` + release build for `/console` after code changed.
+fn remote_rebuild_args(app: &AppConfig, skip_build: bool) -> Vec<String> {
+    remote_rebuild_args_for(app, skip_build, &repo_root(), std::process::id())
+}
+
+/// Same as [`remote_rebuild_args`] but with the repo root and daemon pid
+/// resolved by the caller - the detached `/console` job captures both before
+/// spawning (Section 28.4).
+fn remote_rebuild_args_for(
+    app: &AppConfig,
+    skip_build: bool,
+    repo_root: &Path,
+    pid: u32,
+) -> Vec<String> {
+    let binary = if skip_build {
+        running_binary(repo_root)
+    } else {
+        release_binary(repo_root)
+    };
+
+    let mut args = Vec::new();
+    if skip_build {
+        args.push("-SkipBuild".to_string());
+    }
+    args.extend([
+        "-BotToken".to_string(),
+        app.telegram.bot_token.clone(),
+        "-AdminChatId".to_string(),
+        devops_chat_arg(app),
+        "-Pid".to_string(),
+        pid.to_string(),
+        "-RepoRoot".to_string(),
+        repo_root.display().to_string(),
+        "-Binary".to_string(),
+        binary.display().to_string(),
+    ]);
+    args
+}
+
+/// Spawn the rebuild helper fully detached so it survives this process being
+/// stopped. Never blocks and never fails the command.
+fn spawn_detached_powershell(script_args: &[String]) {
+    spawn_detached_powershell_in(&repo_root(), script_args);
+}
+
+/// [`spawn_detached_powershell`] with an explicit repo root (the `/console` job
+/// captured it before spawning).
+fn spawn_detached_powershell_in(repo_root: &Path, script_args: &[String]) {
+    let script = repo_root.join("scripts").join("remote_rebuild.ps1");
+    if !script.exists() {
+        warn!(script = %script.display(), "remote rebuild script not found");
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        // CREATE_NEW_PROCESS_GROUP (0x200) | DETACHED_PROCESS (0x8).
+        const DETACHED_FLAGS: u32 = 0x0000_0200 | 0x0000_0008;
+        let mut command = std::process::Command::new("powershell.exe");
+        command
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-WindowStyle")
+            .arg("Hidden")
+            .arg("-File")
+            .arg(&script)
+            .args(script_args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(DETACHED_FLAGS);
+        match command.spawn() {
+            Ok(child) => info!(pid = child.id(), "spawned the detached rebuild script"),
+            Err(err) => warn!(error = %err, "cannot spawn the detached rebuild script"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // Best effort on non-Windows hosts: the supported deployment target is
+        // Windows, but a missing pwsh must not break the command.
+        match std::process::Command::new("pwsh")
+            .arg("-NoProfile")
+            .arg("-File")
+            .arg(&script)
+            .args(script_args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => info!(pid = child.id(), "spawned the rebuild script"),
+            Err(err) => warn!(error = %err, "cannot spawn the rebuild script"),
+        }
+    }
+}
+
+/// Everything the detached `/console` task needs, cloned out of the router so
+/// the control-plane poll loop is never blocked for up to 10 minutes
+/// (Section 28.4).
+struct ConsoleJob {
+    config: Arc<ConfigManager>,
+    client: Arc<dyn TelegramClient>,
+    chat_id: i64,
+    instruction: String,
+    repo_root: PathBuf,
+    pid: u32,
+}
+
+/// Run the OpenCode task off the poll loop and deliver its summary. Errors are
+/// logged; the task never panics the caller.
+async fn run_console_job(job: ConsoleJob) {
+    let app = job.config.app();
+    let summary = run_console_task(&app, &job.repo_root, job.pid, &job.instruction).await;
+    if let Err(err) = job.client.send_plain_text(job.chat_id, &summary).await {
+        warn!(error = %err, "cannot deliver the /console output");
+    }
+}
+
+/// Run one OpenCode instruction in the repo root and summarise the result.
+/// When the run leaves the worktree dirty the detached rebuild helper is
+/// started (with build); either way the truncated summary is returned so the
+/// caller can send it.
+async fn run_console_task(
+    app: &AppConfig,
+    repo_root: &Path,
+    pid: u32,
+    instruction: &str,
+) -> String {
+    let prompt = format!(
+        "Follow docs/ARCHITECTURE.md strictly and keep the change minimal and scoped. \
+         Execute this instruction: {instruction}"
+    );
+
+    let mut opencode = tokio::process::Command::new(&app.devops.opencode_bin);
+    opencode
+        .arg("run")
+        .arg(&prompt)
+        .current_dir(repo_root)
+        .kill_on_drop(true);
+
+    let output = match tokio::time::timeout(CONSOLE_TIMEOUT, opencode.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => return format!("OpenCode could not start: {err}"),
+        Err(_) => return "OpenCode timed out after 10 minutes.".to_string(),
+    };
+
+    let mut summary = console_summary(&output);
+    let changed = match tokio::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_root)
+        .kill_on_drop(true)
+        .output()
+        .await
+    {
+        Ok(status) => status.status.success() && !status.stdout.is_empty(),
+        Err(err) => {
+            warn!(error = %err, "cannot run git status after /console");
+            false
+        }
+    };
+
+    if changed {
+        summary
+            .push_str("\n🔨 Code changed - running cargo test and rebuild, restarting shortly...");
+        spawn_detached_powershell_in(
+            repo_root,
+            &remote_rebuild_args_for(app, false, repo_root, pid),
+        );
+    }
+
+    truncate_to_chars(&summary, CONSOLE_SUMMARY_CHARS)
+}
+
+/// `opencode` status plus its captured stdout/stderr.
+fn console_summary(output: &std::process::Output) -> String {
+    let mut text = format!("opencode exit: {}\n", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.trim().is_empty() {
+        text.push_str("stdout:\n");
+        text.push_str(&stdout);
+    }
+    if !stderr.trim().is_empty() {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("stderr:\n");
+        text.push_str(&stderr);
+    }
+    if text.trim().is_empty() {
+        text.push_str("(no output)");
+    }
+    text
+}
+
+/// Truncate on a char boundary; never splits a UTF-8 codepoint.
+fn truncate_to_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    truncated.push_str("\n... (truncated)");
+    truncated
+}
+
 fn start_reply(counts: &QueueCounts) -> String {
     format!(
         "OK Daemon started. Queue: INGESTED {}, ENRICHED {}, MEDIA_READY {}, PUBLISHED {}",
@@ -535,6 +870,9 @@ fn help_reply() -> String {
         "/publish - publish the MEDIA_READY queue (blocked while the circuit is OPEN)",
         "/retry - move NEEDS_INTERVENTION listings back to MEDIA_READY",
         "/done - mark a listing manually published (optional listing id)",
+        "/log - show the newest log lines (optional count, default 30)",
+        "/restart - restart the daemon without rebuilding",
+        "/console - run one OpenCode instruction in the repo (devops admin only)",
     ]
     .join("\n")
 }
@@ -562,7 +900,11 @@ mod tests {
 
     struct Fixture {
         router: CommandRouter,
-        client: FakeTelegramClient,
+        /// Concrete fake, kept for assertions.
+        client: Arc<FakeTelegramClient>,
+        /// The same fake type-erased to the transport trait: `handle` takes this
+        /// so `/console` can clone it into a detached task.
+        handle_client: Arc<dyn TelegramClient>,
         pool: SqlitePool,
         dir: std::path::PathBuf,
     }
@@ -570,9 +912,12 @@ mod tests {
     async fn fixture_with(config: AppConfig) -> Fixture {
         let (pool, dir) = db::test_support::test_pool().await;
         let manager = Arc::new(ConfigManager::for_test(config));
+        let client = Arc::new(FakeTelegramClient::default());
+        let handle_client: Arc<dyn TelegramClient> = client.clone();
         Fixture {
             router: CommandRouter::new(pool.clone(), manager),
-            client: FakeTelegramClient::default(),
+            client,
+            handle_client,
             pool,
             dir,
         }
@@ -617,8 +962,38 @@ mod tests {
         assert_eq!(Command::parse("/publish"), Some(Command::Publish));
         assert_eq!(Command::parse("/retry L123"), Some(Command::Retry));
         assert_eq!(Command::parse("/done"), Some(Command::Done));
+        assert_eq!(Command::parse("/log"), Some(Command::Log));
+        assert_eq!(Command::parse("/restart@PropBot"), Some(Command::Restart));
+        assert_eq!(Command::parse("/console run tests"), Some(Command::Console));
         assert_eq!(Command::parse("hello"), None);
         assert_eq!(Command::parse("/nonsense"), None);
+
+        assert_eq!(
+            Command::parse_with_arg("/log 50"),
+            Some((Command::Log, Some("50".to_string())))
+        );
+        assert_eq!(
+            Command::parse_with_arg("/console fix the bug"),
+            Some((Command::Console, Some("fix the bug".to_string()))),
+            "/console must keep the whole instruction, not one token"
+        );
+        assert_eq!(
+            Command::parse_with_arg("/console   fix   the null deref  bug "),
+            Some((Command::Console, Some("fix the null deref bug".to_string())))
+        );
+        assert_eq!(
+            Command::parse_with_arg("/console"),
+            Some((Command::Console, None))
+        );
+        assert_eq!(
+            Command::parse_with_arg("/retry L123 trailing words"),
+            Some((Command::Retry, Some("L123".to_string()))),
+            "non-console commands stay single-token"
+        );
+        assert_eq!(
+            Command::parse_with_arg("/restart"),
+            Some((Command::Restart, None))
+        );
 
         assert_eq!(
             Command::parse_with_arg("/retry L123"),
@@ -643,6 +1018,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn devops_commands_are_rejected_for_non_admin_senders() {
+        let f = fixture().await;
+        for (update_id, text, expected) in [
+            (700, "/log", "/log"),
+            (701, "/restart", "/restart"),
+            (702, "/console do something", "/console"),
+        ] {
+            let outcome = f
+                .router
+                .handle(&f.handle_client, &update_fixture(update_id, 777, text))
+                .await
+                .expect("handle");
+            assert_eq!(
+                outcome,
+                CommandOutcome::Unauthorized {
+                    sender_id: 777,
+                    command: expected.to_string(),
+                }
+            );
+            assert_eq!(
+                db::get_cursor(&f.pool).await.expect("cursor"),
+                update_id,
+                "the cursor must advance past the rejected command"
+            );
+        }
+        assert!(
+            f.client.sent_texts().is_empty(),
+            "rejected devops commands must not send anything"
+        );
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn log_is_allowed_for_the_devops_admin() {
+        let f = fixture().await;
+        let outcome = f
+            .router
+            .handle(&f.handle_client, &update_fixture(710, 42, "/log 5"))
+            .await
+            .expect("handle");
+        // No writer is installed in unit tests, so the ring buffer is empty.
+        assert_eq!(reply_of(outcome), "No log lines yet.");
+        assert_eq!(db::get_cursor(&f.pool).await.expect("cursor"), 710);
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn devops_admin_bypasses_a_restrictive_allowlist() {
+        let mut config = test_app_config();
+        // The devops admin is NOT on the broader command allowlist.
+        config.telegram.allowed_sender_ids = vec![999];
+        config.devops.admin_chat_id = Some(42);
+        let f = fixture_with(config).await;
+
+        let outcome = f
+            .router
+            .handle(&f.handle_client, &update_fixture(730, 42, "/log"))
+            .await
+            .expect("handle");
+        assert_eq!(reply_of(outcome), "No log lines yet.");
+        assert_eq!(db::get_cursor(&f.pool).await.expect("cursor"), 730);
+
+        // A non-devops command from the same sender keeps the allowlist gate:
+        // sender 42 posts in chat 42, which *is* the telegram admin chat, so use
+        // a sender outside both lists instead.
+        let denied = f
+            .router
+            .handle(&f.handle_client, &update_fixture(731, 777, "/status"))
+            .await
+            .expect("handle");
+        assert_eq!(
+            denied,
+            CommandOutcome::Unauthorized {
+                sender_id: 777,
+                command: "/status".to_string(),
+            }
+        );
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn console_noops_when_disabled() {
+        let mut config = test_app_config();
+        config.devops.console_enabled = false;
+        let f = fixture_with(config).await;
+
+        let outcome = f
+            .router
+            .handle(
+                &f.handle_client,
+                &update_fixture(720, 42, "/console run the tests"),
+            )
+            .await
+            .expect("handle");
+        assert_eq!(reply_of(outcome), "Console is disabled.");
+        assert_eq!(f.client.sent_texts(), vec!["Console is disabled."]);
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
     async fn start_reply_matches_contract_and_clears_pause() {
         let f = fixture().await;
         db::set_state(&f.pool, STATE_PAUSED, "true")
@@ -651,7 +1127,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(10, 42, "/start"))
+            .handle(&f.handle_client, &update_fixture(10, 42, "/start"))
             .await
             .expect("handle");
 
@@ -682,7 +1158,7 @@ mod tests {
         let f = fixture().await;
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(11, 42, "/pause"))
+            .handle(&f.handle_client, &update_fixture(11, 42, "/pause"))
             .await
             .expect("handle");
         match outcome {
@@ -705,7 +1181,7 @@ mod tests {
             .expect("seed");
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(12, 42, "/resume"))
+            .handle(&f.handle_client, &update_fixture(12, 42, "/resume"))
             .await
             .expect("handle");
         assert_eq!(
@@ -731,7 +1207,7 @@ mod tests {
             .expect("seed pause");
 
         f.router
-            .handle(&f.client, &update_fixture(17, 42, "/resume"))
+            .handle(&f.handle_client, &update_fixture(17, 42, "/resume"))
             .await
             .expect("handle");
 
@@ -753,7 +1229,7 @@ mod tests {
             .expect("seed circuit");
 
         f.router
-            .handle(&f.client, &update_fixture(18, 42, "/start"))
+            .handle(&f.handle_client, &update_fixture(18, 42, "/start"))
             .await
             .expect("handle");
 
@@ -781,7 +1257,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(20, 42, "/resume"))
+            .handle(&f.handle_client, &update_fixture(20, 42, "/resume"))
             .await
             .expect("handle");
         let reply = match outcome {
@@ -810,7 +1286,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(21, 42, "/resume"))
+            .handle(&f.handle_client, &update_fixture(21, 42, "/resume"))
             .await
             .expect("handle");
         assert_eq!(
@@ -845,7 +1321,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(22, 42, "/resume force"))
+            .handle(&f.handle_client, &update_fixture(22, 42, "/resume force"))
             .await
             .expect("handle");
 
@@ -876,7 +1352,7 @@ mod tests {
             .expect("seed circuit");
 
         f.router
-            .handle(&f.client, &update_fixture(19, 42, "/pause"))
+            .handle(&f.handle_client, &update_fixture(19, 42, "/pause"))
             .await
             .expect("handle");
 
@@ -893,7 +1369,7 @@ mod tests {
             .expect("seed");
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(13, 42, "/status"))
+            .handle(&f.handle_client, &update_fixture(13, 42, "/status"))
             .await
             .expect("handle");
         let reply = match outcome {
@@ -914,7 +1390,7 @@ mod tests {
         let f = fixture().await;
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(14, 42, "/help"))
+            .handle(&f.handle_client, &update_fixture(14, 42, "/help"))
             .await
             .expect("handle");
         let reply = match outcome {
@@ -935,7 +1411,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(15, 777, "/pause"))
+            .handle(&f.handle_client, &update_fixture(15, 777, "/pause"))
             .await
             .expect("handle");
         assert_eq!(
@@ -957,7 +1433,7 @@ mod tests {
         let f = fixture().await;
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(16, 42, "3 bedroom condo"))
+            .handle(&f.handle_client, &update_fixture(16, 42, "3 bedroom condo"))
             .await
             .expect("handle");
         assert_eq!(outcome, CommandOutcome::Ignored);
@@ -1054,7 +1530,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(42, 42, "/clear"))
+            .handle(&f.handle_client, &update_fixture(42, 42, "/clear"))
             .await
             .expect("handle");
 
@@ -1137,7 +1613,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(31, 42, "/publish"))
+            .handle(&f.handle_client, &update_fixture(31, 42, "/publish"))
             .await
             .expect("handle");
 
@@ -1161,7 +1637,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(30, 42, "/publish"))
+            .handle(&f.handle_client, &update_fixture(30, 42, "/publish"))
             .await
             .expect("handle");
 
@@ -1183,7 +1659,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(31, 42, "/publish"))
+            .handle(&f.handle_client, &update_fixture(31, 42, "/publish"))
             .await
             .expect("handle");
 
@@ -1208,7 +1684,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(32, 42, "/retry"))
+            .handle(&f.handle_client, &update_fixture(32, 42, "/retry"))
             .await
             .expect("handle");
 
@@ -1264,7 +1740,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(33, 42, "/retry L1"))
+            .handle(&f.handle_client, &update_fixture(33, 42, "/retry L1"))
             .await
             .expect("handle");
 
@@ -1296,7 +1772,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(34, 42, "/retry"))
+            .handle(&f.handle_client, &update_fixture(34, 42, "/retry"))
             .await
             .expect("handle");
 
@@ -1315,7 +1791,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(35, 42, "/retry"))
+            .handle(&f.handle_client, &update_fixture(35, 42, "/retry"))
             .await
             .expect("handle");
 
@@ -1351,7 +1827,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(40, 42, "/done"))
+            .handle(&f.handle_client, &update_fixture(40, 42, "/done"))
             .await
             .expect("handle");
 
@@ -1403,7 +1879,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(41, 42, "/done L1"))
+            .handle(&f.handle_client, &update_fixture(41, 42, "/done L1"))
             .await
             .expect("handle");
         assert_eq!(
@@ -1413,7 +1889,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(42, 42, "/done L-MISSING"))
+            .handle(&f.handle_client, &update_fixture(42, 42, "/done L-MISSING"))
             .await
             .expect("handle");
         assert_eq!(
@@ -1423,7 +1899,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(43, 42, "/done"))
+            .handle(&f.handle_client, &update_fixture(43, 42, "/done"))
             .await
             .expect("handle");
         assert_eq!(
@@ -1442,7 +1918,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(44, 42, "/status"))
+            .handle(&f.handle_client, &update_fixture(44, 42, "/status"))
             .await
             .expect("handle");
         let reply = reply_of(outcome);
@@ -1476,7 +1952,7 @@ mod tests {
 
         let outcome = f
             .router
-            .handle(&f.client, &update_fixture(45, 42, "/publish"))
+            .handle(&f.handle_client, &update_fixture(45, 42, "/publish"))
             .await
             .expect("handle");
 

@@ -96,6 +96,8 @@ pub struct AppConfig {
     pub publisher: PublisherConfig,
     pub gc: GcConfig,
     pub supervisor: SupervisorConfig,
+    #[serde(default)]
+    pub devops: DevOpsConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -306,6 +308,48 @@ pub struct GcConfig {
 pub struct SupervisorConfig {
     pub telegram_admin_chat_id: i64,
     pub circuit_breaker_cooldown_min: u32,
+}
+
+/// Remote DevOps observability + self-maintenance (Section 28.1).
+///
+/// `admin_chat_id` is a *separate* gate from the telegram/supervisor admin ids:
+/// the three self-maintenance commands and every devops notification only fire
+/// for this one personal chat. `None` disables the whole feature set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DevOpsConfig {
+    /// Personal chat for alerts, lifecycle messages and `/log` `/restart`
+    /// `/console`. `0` in the TOML idiom is normalised to `None` (disabled).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_chat_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub admin_chat_id: Option<i64>,
+    pub console_enabled: bool,
+    pub opencode_bin: String,
+    pub log_buffer_lines: usize,
+}
+
+impl Default for DevOpsConfig {
+    fn default() -> Self {
+        Self {
+            admin_chat_id: None,
+            console_enabled: true,
+            opencode_bin: "opencode".to_string(),
+            log_buffer_lines: 200,
+        }
+    }
+}
+
+/// `admin_chat_id` accepts a plain integer; `0` means "disabled" (the shipped
+/// TOML spelling) and is normalised to `None`.
+fn deserialize_optional_chat_id<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<i64>::deserialize(deserializer)?;
+    Ok(value.filter(|chat_id| *chat_id != 0))
 }
 
 // --- selectors.json (Section 14.2) ------------------------------------------
@@ -667,6 +711,18 @@ impl AppConfig {
         }
         if self.gc.interval_hours == 0 {
             return Err(ConfigError::invalid("gc.interval_hours", "must be >= 1"));
+        }
+        if self.devops.log_buffer_lines == 0 {
+            return Err(ConfigError::invalid(
+                "devops.log_buffer_lines",
+                "must be >= 1",
+            ));
+        }
+        if self.devops.console_enabled && self.devops.opencode_bin.trim().is_empty() {
+            return Err(ConfigError::invalid(
+                "devops.opencode_bin",
+                "required when devops.console_enabled = true",
+            ));
         }
         if self.watermark.position != WatermarkPosition::BottomLeft {
             return Err(ConfigError::invalid(
@@ -1175,6 +1231,12 @@ interval_hours = 24
 [supervisor]
 telegram_admin_chat_id = 42
 circuit_breaker_cooldown_min = 30
+
+[devops]
+admin_chat_id = 42
+console_enabled = true
+opencode_bin = "opencode"
+log_buffer_lines = 200
 "#,
     )
     .expect("test config parses");
@@ -1230,6 +1292,48 @@ mod tests {
         assert!(!config.publisher.rent_create_url.trim().is_empty());
         assert_eq!(config.gc.retention_days, 7);
         assert_eq!(config.supervisor.circuit_breaker_cooldown_min, 30);
+        assert_eq!(config.devops.admin_chat_id, None);
+        assert!(config.devops.console_enabled);
+        assert_eq!(config.devops.opencode_bin, "opencode");
+        assert_eq!(config.devops.log_buffer_lines, 200);
+    }
+
+    #[test]
+    fn devops_defaults_match_contract_and_zero_disables_the_chat() {
+        let defaulted = AppConfig::from_toml_str("[publisher]\ndry_run = true\n").expect("parse");
+        assert_eq!(defaulted.devops, DevOpsConfig::default());
+        assert_eq!(defaulted.devops.admin_chat_id, None);
+        assert!(defaulted.devops.console_enabled);
+        assert_eq!(defaulted.devops.opencode_bin, "opencode");
+        assert_eq!(defaulted.devops.log_buffer_lines, 200);
+
+        // `admin_chat_id = 0` is the documented "disabled" spelling.
+        let disabled =
+            AppConfig::from_toml_str("[devops]\nadmin_chat_id = 0\n").expect("parse disabled");
+        assert_eq!(disabled.devops.admin_chat_id, None);
+
+        let enabled =
+            AppConfig::from_toml_str("[devops]\nadmin_chat_id = 4242\n").expect("parse enabled");
+        assert_eq!(enabled.devops.admin_chat_id, Some(4242));
+    }
+
+    #[test]
+    fn validation_rejects_zero_log_buffer_lines() {
+        let mut config = test_app_config();
+        config.devops.log_buffer_lines = 0;
+        let err = config.validate().expect_err("zero buffer must fail");
+        assert!(err.to_string().contains("devops.log_buffer_lines"));
+    }
+
+    #[test]
+    fn validation_rejects_blank_opencode_bin_while_console_is_enabled() {
+        let mut config = test_app_config();
+        config.devops.opencode_bin.clear();
+        let err = config.validate().expect_err("blank opencode_bin must fail");
+        assert!(err.to_string().contains("devops.opencode_bin"));
+
+        config.devops.console_enabled = false;
+        config.validate().expect("disabled console needs no binary");
     }
 
     #[test]

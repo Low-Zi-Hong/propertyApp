@@ -188,7 +188,7 @@ impl ControlPlane {
         let mut attempt = 0u32;
         loop {
             let outcome = if update.is_command() {
-                self.router.handle(&*self.client, update).await.map(|_| ())
+                self.router.handle(&self.client, update).await.map(|_| ())
             } else {
                 match self.ingestor.process_update(update).await {
                     Ok(processed) => {

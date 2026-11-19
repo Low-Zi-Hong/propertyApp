@@ -7,13 +7,13 @@
 //! would have been deleted.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use sqlx::SqlitePool;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use crate::config::ConfigManager;
+use crate::config::{AppConfig, ConfigManager};
 use crate::db;
 use crate::telegram::wait_for_shutdown;
 
@@ -98,6 +98,10 @@ impl GcWorker {
         .to_string();
         db::record_supervisor_event(&self.pool, None, "GC_PURGE", "INFO", &detail).await?;
 
+        // Also prune rolled log files (Section 28.2); a log failure must not
+        // abort the media pass.
+        prune_old_logs(&app).await;
+
         Ok(GcReport {
             purged,
             ids,
@@ -121,6 +125,62 @@ impl GcWorker {
             }
         }
         info!("gc worker stopped");
+    }
+}
+
+/// Best-effort pruning of rolled log files older than `[gc].retention_days`
+/// (Section 28.2). Only `propbotd-*.log` roll files match, so the active
+/// `propbotd.log` is never deleted. Filesystem errors are logged, never fatal.
+async fn prune_old_logs(app: &AppConfig) {
+    let dir = app.data_dir().join("logs");
+    let Some(cutoff) = SystemTime::now().checked_sub(Duration::from_secs(
+        u64::from(app.gc.retention_days) * 86_400,
+    )) else {
+        return;
+    };
+
+    let mut entries = match tokio::fs::read_dir(&dir).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            warn!(dir = %dir.display(), error = %err, "gc cannot read the log directory");
+            return;
+        }
+    };
+
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(err) => {
+                warn!(dir = %dir.display(), error = %err, "gc cannot list the log directory");
+                break;
+            }
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("propbotd-") || !name.ends_with(".log") {
+            continue;
+        }
+        let Some(modified) = entry
+            .metadata()
+            .await
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+        else {
+            continue;
+        };
+        if modified >= cutoff {
+            continue;
+        }
+        if app.gc.dry_run {
+            info!(file = %name, "gc dry run: rolled log file would be pruned");
+            continue;
+        }
+        match tokio::fs::remove_file(entry.path()).await {
+            Ok(()) => info!(file = %name, "gc pruned rolled log file"),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => warn!(file = %name, error = %err, "gc cannot remove the rolled log file"),
+        }
     }
 }
 
