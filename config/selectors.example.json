@@ -1,0 +1,39 @@
+{
+  "login": {
+    "email_input": "input[name=\"email\"]",
+    "password_input": "input[name=\"pass\"]",
+    "login_button": "button[name=\"login\"]"
+  },
+  "marketplace": {
+    "create_home_listing": "text=Home for sale or rent",
+    "choose_listing_type_text": ["Choose listing type"],
+    "form_ready_text": ["Property for sale or rent", "Property type"],
+    "file_input": "input[type=\"file\"]",
+    "property_type": ["[aria-label=\"Rental type\"]", "[aria-label=\"Property type\"]"],
+    "bedrooms": ["[aria-label=\"Number of bedrooms\"]"],
+    "bathrooms": ["[aria-label=\"Number of bathrooms\"]"],
+    "price": ["[aria-label=\"Price per month\"]", "[aria-label=\"Price\"]"],
+    "location": ["[aria-label=\"Rental location\"]", "[aria-label=\"Location\"]"],
+    "location_suggestion": "[role=\"listbox\"] [role=\"option\"], [role=\"option\"]",
+    "description": ["[aria-label=\"Description\"]"],
+    "next_button": ["[aria-label=\"Next\"]"]
+  },
+  "groups": {
+    "crosspost_checkboxes": "input[type=\"checkbox\"], div[role=\"checkbox\"]"
+  },
+  "publish": {
+    "publish_button": ["[aria-label=\"Publish\"]"],
+    "success_marker": "text=Your listing is now live"
+  },
+  "captcha": {
+    "iframe": "iframe[src*=\"captcha\"], iframe[title*=\"captcha\" i]",
+    "checkbox": "input[type=\"checkbox\"][name*=\"captcha\" i], div[role=\"checkbox\"][aria-label*=\"captcha\" i]",
+    "detect_text": ["Security Check", "Please confirm you are not a robot", "captcha"]
+  },
+  "checkpoint": {
+    "detect_text": ["We suspended your account", "Confirm your identity", "checkpoint"]
+  },
+  "account_risk": {
+    "detect_text": ["Limit reached", "You've reached your limit", "temporarily blocked", "Try again later"]
+  }
+}

@@ -1,0 +1,79 @@
+# Property Listing Automation Daemon - config.toml (copy to config/config.toml)
+# All volatile parameters live here and are hot-reloadable. No magic constants in code.
+
+[storage]
+data_dir = "data"
+db_file  = "propbot.db"
+
+[telegram]
+bot_token = ""                # env fallback: PROPBOT_BOT_TOKEN
+allowed_sender_ids = []       # empty = all; else command allowlist
+admin_chat_id = 0
+poll_timeout_secs = 30
+media_group_window_secs = 5
+
+[ai]
+deepseek_api_key = ""         # env fallback: PROPBOT_DEEPSEEK_API_KEY
+base_url = "https://api.deepseek.com"
+vision_enabled = false        # room-classifier seam for diverse photo selection (no-op while false)
+
+[ai.enrichment]
+model = "deepseek-v4-flash"
+timeout_secs = 60
+max_tokens = 4096
+temperature = 0.7
+layout_variations = 4
+
+[ai.supervisor]
+model = "deepseek-v4-pro"
+
+[ai.vision]
+model = ""
+timeout_secs = 60
+
+[agent]
+agent_name = "Canny Chong"
+agent_phone = "016-5583820"
+
+[media]
+dhash_hamming_threshold = 8     # clustering similarity: photos within this Hamming distance share a room/angle
+watermark_text = "Canny Chong\n016-5583820"
+watermark_font = "assets/font.ttf"
+perturb_crop_px = [1, 2]
+perturb_brightness = 0.01
+strip_exif = true
+max_photos = 8                  # selected, watermarked photo set size cap
+
+[watermark]
+opacity = 230                   # text alpha 0-255
+position = "center"             # center | bottom_right | bottom_left | top_right | top_left
+
+[rate_limit]
+min_delay_min = 8
+max_delay_min = 18
+max_per_hour = 5
+max_per_24h = 12
+active_hours_start = "08:30"
+active_hours_end = "23:00"
+timezone = "Asia/Kuala_Lumpur"
+
+[publisher]
+chrome_path = ""
+user_data_dir = "data/chrome-profile"
+cdp_port = 9222
+headless = false                # true = --headless; false keeps the window visible
+selectors_file = "config/selectors.json"
+submit_timeout_secs = 60
+max_crosspost_groups = 10       # cross-post FB group cap
+dry_run = true                  # stop before Publish; screenshot + notify
+sale_create_url = "https://www.facebook.com/marketplace/create/propertyforsale"
+rent_create_url = "https://www.facebook.com/marketplace/create/propertyrentals"
+
+[gc]
+retention_days = 7
+interval_hours = 24
+dry_run = false
+
+[supervisor]
+telegram_admin_chat_id = 0
+circuit_breaker_cooldown_min = 30
