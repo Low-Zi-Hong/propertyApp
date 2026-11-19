@@ -37,6 +37,9 @@ pub struct EnrichmentOutput {
     pub land_area: Option<String>,
     #[serde(default)]
     pub furnishing: Option<String>,
+    /// Short human condition label when mentioned in the source (Section 26.1).
+    #[serde(default)]
+    pub condition: Option<String>,
     /// Pre-flight fields the M4 publisher cannot guess (Section 24.2).
     #[serde(default)]
     pub bedrooms: Option<i64>,
@@ -92,6 +95,30 @@ pub fn pick_layout_variation(variations: u32) -> u32 {
         return 0;
     }
     rand::thread_rng().gen_range(0..variations)
+}
+
+/// Deterministic headline when the model omits `title` (Section 26.2).
+///
+/// Only uses facts the pipeline already validated (`property_type`, `category`,
+/// `location`); never invents anything. `None` when there is no location.
+pub fn fallback_title(
+    property_type: Option<&str>,
+    category: Option<&str>,
+    location: Option<&str>,
+) -> Option<String> {
+    let location = location.map(str::trim).filter(|value| !value.is_empty())?;
+    let sale_rent = if category == Some("rent") {
+        "For Rent"
+    } else {
+        "For Sale"
+    };
+    let property_type = property_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some(match property_type {
+        Some(property_type) => format!("{property_type} {sale_rent} in {location}"),
+        None => format!("Property {sale_rent} in {location}"),
+    })
 }
 
 /// Parse the model's JSON string, tolerating a ```json code fence.
@@ -269,6 +296,7 @@ impl EnrichmentOutput {
             built_up_area: Some("1200 sqft".to_string()),
             land_area: None,
             furnishing: Some("fully".to_string()),
+            condition: Some("Fully Furnished".to_string()),
             bedrooms: Some(3),
             bathrooms: Some(2),
             property_type: Some("House".to_string()),
@@ -309,6 +337,43 @@ mod tests {
         );
         assert_eq!(system, "sys Test Agent 000-0000000 {{ORIG_AGENT_INITIALS}}");
         assert_eq!(user, "user raw listing 4 2");
+    }
+
+    #[test]
+    fn fallback_title_sale_uses_property_type_and_location() {
+        assert_eq!(
+            fallback_title(Some("House"), Some("sell"), Some("Bercham, Ipoh")).as_deref(),
+            Some("House For Sale in Bercham, Ipoh")
+        );
+    }
+
+    #[test]
+    fn fallback_title_rent_uses_for_rent() {
+        assert_eq!(
+            fallback_title(Some("Apartment/Condo"), Some("rent"), Some("Cheras")).as_deref(),
+            Some("Apartment/Condo For Rent in Cheras")
+        );
+    }
+
+    #[test]
+    fn fallback_title_missing_property_type_uses_property_prefix() {
+        assert_eq!(
+            fallback_title(None, Some("sell"), Some("Ipoh")).as_deref(),
+            Some("Property For Sale in Ipoh")
+        );
+        assert_eq!(
+            fallback_title(Some("  "), Some("rent"), Some("Ipoh")).as_deref(),
+            Some("Property For Rent in Ipoh")
+        );
+    }
+
+    #[test]
+    fn fallback_title_missing_location_is_none() {
+        assert_eq!(fallback_title(Some("House"), Some("sell"), None), None);
+        assert_eq!(
+            fallback_title(Some("House"), Some("sell"), Some("   ")),
+            None
+        );
     }
 
     #[test]

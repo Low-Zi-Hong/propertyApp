@@ -50,6 +50,9 @@ EXTRACTION CONTRACT (JSON keys are fixed, do not rename them)
 - built_up_area: built-up size as text including unit, e.g. "1200 sqft". null if absent.
 - land_area: land size as text including unit, e.g. "22x70", "4000 sqft". null if absent.
 - furnishing: one of "fully", "partially", "unfurnished", "unknown", or null.
+- condition: short human condition label ONLY when mentioned in the source (e.g.
+  "Fully Furnished", "Partially Furnished", "Unfurnished", "Brand New"). null otherwise.
+  Never invent a condition.
 - bedrooms: number of bedrooms as an integer (e.g. 3). null if absent.
 - bathrooms: number of bathrooms as an integer (e.g. 2). null if absent.
 - property_type: one of "House", "Apartment/Condo", "Townhouse", "Land", "Shop/Office",
@@ -73,6 +76,7 @@ RESPONSE SHAPE
   "built_up_area": string | null,
   "land_area": string | null,
   "furnishing": string | null,
+  "condition": string | null,
   "bedrooms": integer | null,
   "bathrooms": integer | null,
   "property_type": string | null,

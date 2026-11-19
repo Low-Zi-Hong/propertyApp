@@ -1277,3 +1277,77 @@ never drives Chrome; the operator posts to Facebook by hand and marks each listi
 5. `/status` (disabled) shows `Publisher: DISABLED (MVP mode)` and omits
    Quota/Circuit/window lines; `/publish` (disabled) replies the exact MVP string.
 6. `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` all pass.
+
+---
+
+## 26. Milestone 6 - Enrichment title/condition + copy-ready multi-message preview (build contract)
+
+**Scope:** enrich a `condition` field and a deterministic `title` fallback, and change the
+`MEDIA_READY` Telegram preview so every copyable field is its own message (no field-name
+prefixes) after the watermarked photo album. No existing publisher/pipeline code is removed.
+
+### 26.1 Enrichment (`src/pipeline/enrich.rs`, `prompts/enrichment_system.md`)
+
+- `EnrichmentOutput` gains `#[serde(default)] pub condition: Option<String>` (new field).
+- `prompts/enrichment_system.md`: add `condition` to EXTRACTION CONTRACT + RESPONSE SHAPE:
+  a short human label only when mentioned in the source (e.g. `Fully Furnished`,
+  `Partially Furnished`, `Unfurnished`, `Brand New`); `null` otherwise; never invent.
+- `title` is already extracted; add the deterministic fallback below.
+
+### 26.2 Title fallback (`src/pipeline/enrich.rs` + `apply_enriched`)
+
+- Add `pub fn fallback_title(property_type: Option<&str>, category: Option<&str>, location: Option<&str>) -> Option<String>`:
+  - `sale_rent = "For Rent"` iff `category == Some("rent")`, else `"For Sale"`.
+  - if `location` non-empty and `property_type` non-empty -> `"{property_type} {sale_rent} in {location}"`.
+  - if `location` non-empty and `property_type` empty -> `"Property {sale_rent} in {location}"`.
+  - else `None`.
+- In `PipelineWorker::apply_enriched`, bind
+  `output.title.clone().or_else(|| fallback_title(output.property_type.as_deref(), output.category.as_deref(), output.location.as_deref()))`
+  instead of `output.title`, so a missing title always resolves to a deterministic headline.
+- Unit-test `fallback_title` (sale, rent, missing property_type, missing location).
+
+### 26.3 Persistence (`migrations/0004_condition.sql` + `apply_enriched`)
+
+- New migration: `ALTER TABLE listings ADD COLUMN condition TEXT;`
+- `apply_enriched` adds `condition = ?` bound to `output.condition.as_deref()`.
+- No backfill; pre-existing rows stay `NULL`.
+
+### 26.4 Preview (`src/pipeline/worker.rs::send_review_preview` + `format_price_rm`)
+
+- `send_review_preview` now SELECTs `chat_id, title, location, price_rm, condition, ad_copy`
+  (title is the enriched/fallback headline; location and price are guaranteed by
+  `missing_fields`; `condition` may be NULL).
+- If `watermarked` is non-empty, `send_photo_album(chat_id, watermarked, "")` (empty caption).
+- Then `await` each `send_plain_text` **in strict order** (plain text, no `escape_html`, no HTML `parse_mode`):
+  1. `title` (skip if None/empty)
+  2. `location` (skip if None/empty)
+  3. `format_price_rm(price_rm)` (skip if None)
+  4. `condition` (skip if None/empty)   <- the only explicitly-optional bubble
+  5. `ad_copy` description (skip if None/empty)
+- `finalize_media_ready` (zero/no usable photos) reuses the same `send_review_preview`
+  with an empty album, so it emits the same ordered field bubbles without the album.
+- Add `fn format_price_rm(price: f64) -> String`: `"RM "` + thousands-grouped integer with
+  no decimals when whole, else 2 decimals (e.g. 680000.0 -> `RM 680,000`,
+  1800.0 -> `RM 1,800`, 1234567.5 -> `RM 1,234,567.50`). Unit-test it.
+
+### 26.5 Tests (`src/pipeline/enrich.rs`, `src/pipeline/worker.rs`, `src/telegram/`)
+
+- Add a full-preview seed helper (ENRICHED row with `title`, `price_rm`, `location`,
+  optional `condition`, `ad_copy`, `chat_id`/`anchor_message_id`). Keep the existing
+  `seed_enriched_listing` intact for the other tests.
+- `media_ready_sends_review_album_and_ad_copy` (with condition): assert the album caption is
+  empty (`""`) and `FakeTelegramClient::sent_messages()` equals, in order,
+  `[title, location, "RM 680,000", "Fully Furnished", ad_copy]`.
+- New test (condition = None): assert the ordered messages are `[title, location, "RM 680,000", ad_copy]`
+  (4 bubbles, no condition).
+- `format_price_rm` and `fallback_title` unit tests as above.
+
+### 26.6 Acceptance criteria
+
+1. `condition` parses from JSON and is persisted to `listings.condition` (NULL when absent).
+2. Missing `title` resolves via `fallback_title` (deterministic, no invented facts).
+3. Preview sends the album with empty caption, then the field bubbles in exact order with
+   no field-name prefixes, `condition` included only when non-empty.
+4. Price renders `RM 680,000` style (thousands separators).
+5. `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` all pass.
+

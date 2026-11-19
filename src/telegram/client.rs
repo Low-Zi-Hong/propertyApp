@@ -288,6 +288,14 @@ pub trait TelegramClient: Send + Sync {
         html_text: &'a str,
     ) -> BoxFuture<'a, TelegramResult<i64>>;
 
+    /// Send plain text (no HTML parsing) - for copy that must be reproduced
+    /// verbatim.
+    fn send_plain_text<'a>(
+        &'a self,
+        chat_id: i64,
+        text: &'a str,
+    ) -> BoxFuture<'a, TelegramResult<i64>>;
+
     /// Attach an emoji reaction to a message (Section 21.2). Callers log and
     /// ignore failures: not every chat/emoji combination is accepted.
     fn set_message_reaction<'a>(
@@ -572,6 +580,23 @@ impl TelegramClient for ReqwestTelegramClient {
         })
     }
 
+    fn send_plain_text<'a>(
+        &'a self,
+        chat_id: i64,
+        text: &'a str,
+    ) -> BoxFuture<'a, TelegramResult<i64>> {
+        Box::pin(async move {
+            // No `parse_mode`: Telegram must reproduce `<`, `>` and `&` verbatim.
+            let body = serde_json::json!({
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": true,
+            });
+            let sent: SentMessage = self.post_json("sendMessage", body, None).await?;
+            Ok(sent.message_id)
+        })
+    }
+
     fn set_message_reaction<'a>(
         &'a self,
         chat_id: i64,
@@ -826,6 +851,21 @@ pub mod testing {
             })
         }
 
+        fn send_plain_text<'a>(
+            &'a self,
+            chat_id: i64,
+            text: &'a str,
+        ) -> BoxFuture<'a, TelegramResult<i64>> {
+            Box::pin(async move {
+                let id = self.next_message_id.fetch_add(1, Ordering::SeqCst) + 1;
+                self.sent
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((chat_id, id, text.to_string()));
+                Ok(id)
+            })
+        }
+
         fn set_message_reaction<'a>(
             &'a self,
             chat_id: i64,
@@ -971,6 +1011,33 @@ mod tests {
         let client = testing::FakeTelegramClient::default();
         client.send_message(42, "hello").await.expect("send");
         assert_eq!(client.sent_messages(), vec![(42, "hello".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn fake_client_records_plain_text_in_order_with_html_messages() {
+        let client = testing::FakeTelegramClient::default();
+        assert_eq!(
+            client.send_message(42, "a < b").await.expect("html send"),
+            1
+        );
+        assert_eq!(
+            client
+                .send_plain_text(42, "a & b <c>")
+                .await
+                .expect("plain send"),
+            2
+        );
+        assert_eq!(
+            client.sent_with_ids(),
+            vec![
+                (42, 1, "a < b".to_string()),
+                (42, 2, "a & b <c>".to_string()),
+            ]
+        );
+        assert_eq!(
+            client.sent_texts(),
+            vec!["a < b".to_string(), "a & b <c>".to_string()]
+        );
     }
 
     #[tokio::test]

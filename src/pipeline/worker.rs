@@ -15,7 +15,8 @@ use crate::events::{DaemonEvent, EventBus, InterventionReason, Severity};
 use crate::media::filter::{Candidate, FilterParams, PhotoSelector};
 use crate::media::watermark::{watermark_batch, WatermarkParams};
 use crate::pipeline::enrich::{
-    build_prompts, pick_layout_variation, EnrichmentClient, EnrichmentOutput, PromptInput,
+    build_prompts, fallback_title, pick_layout_variation, EnrichmentClient, EnrichmentOutput,
+    PromptInput,
 };
 use crate::telegram::client::TelegramClient;
 use crate::telegram::download::{MediaDownloader, PendingAsset};
@@ -391,26 +392,53 @@ impl PipelineWorker {
         Ok(())
     }
 
-    /// Best-effort Telegram review preview (Section 23.3): the watermarked
-    /// album (or a plain ad-copy message when there is nothing to show).
+    /// Best-effort Telegram review preview (Sections 23.3 / 26.4): the
+    /// watermarked album with an empty caption, then one raw (unescaped) message
+    /// per copyable field in strict order.
     async fn send_review_preview(&self, listing_id: &str, watermarked: &[PathBuf]) {
-        let row: Option<(Option<i64>, Option<String>)> =
-            sqlx::query_as("SELECT chat_id, ad_copy FROM listings WHERE id = ?")
-                .bind(listing_id)
-                .fetch_optional(&self.pool)
-                .await
-                .unwrap_or(None);
-        let Some((Some(chat_id), ad_copy)) = row else {
+        type PreviewRow = (
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<f64>,
+            Option<String>,
+            Option<String>,
+        );
+        let row: Option<PreviewRow> = sqlx::query_as(
+            "SELECT chat_id, title, location, price_rm, condition, ad_copy
+             FROM listings WHERE id = ?",
+        )
+        .bind(listing_id)
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap_or(None);
+        let Some((Some(chat_id), title, location, price_rm, condition, ad_copy)) = row else {
             return;
         };
-        let caption = ad_copy.unwrap_or_default();
 
-        if watermarked.is_empty() {
-            if let Err(err) = self
-                .client
-                .send_message(chat_id, &escape_html(&caption))
-                .await
-            {
+        if !watermarked.is_empty() {
+            if let Err(err) = self.client.send_photo_album(chat_id, watermarked, "").await {
+                warn!(
+                    listing_id,
+                    chat_id,
+                    error = %err,
+                    "cannot send media-ready review album"
+                );
+            }
+        }
+
+        let field = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+        let mut texts: Vec<String> = Vec::new();
+        texts.extend(field(title));
+        texts.extend(field(location));
+        if let Some(price) = price_rm {
+            texts.push(format_price_rm(price));
+        }
+        texts.extend(field(condition));
+        texts.extend(field(ad_copy));
+
+        for text in texts {
+            if let Err(err) = self.client.send_plain_text(chat_id, &text).await {
                 warn!(
                     listing_id,
                     chat_id,
@@ -418,17 +446,6 @@ impl PipelineWorker {
                     "cannot send media-ready review message"
                 );
             }
-        } else if let Err(err) = self
-            .client
-            .send_photo_album(chat_id, watermarked, &caption)
-            .await
-        {
-            warn!(
-                listing_id,
-                chat_id,
-                error = %err,
-                "cannot send media-ready review album"
-            );
         }
     }
 
@@ -503,16 +520,23 @@ impl PipelineWorker {
         output: &EnrichmentOutput,
     ) -> anyhow::Result<()> {
         let now = db::now_ms();
+        let title = output.title.clone().or_else(|| {
+            fallback_title(
+                output.property_type.as_deref(),
+                output.category.as_deref(),
+                output.location.as_deref(),
+            )
+        });
         let result = sqlx::query(
             "UPDATE listings SET
                  status = 'ENRICHED',
                  title = ?, price_rm = ?, category = ?, location = ?, tenure = ?,
                  built_up_area = ?, land_area = ?, furnishing = ?,
-                 bedrooms = ?, bathrooms = ?, property_type = ?,
+                 bedrooms = ?, bathrooms = ?, property_type = ?, condition = ?,
                  ad_copy = ?, layout_variation = ?, enriched_at = ?, updated_at = ?
              WHERE id = ? AND status = 'INGESTED'",
         )
-        .bind(output.title.as_deref())
+        .bind(title.as_deref())
         .bind(output.price_rm)
         .bind(output.category.as_deref())
         .bind(output.location.as_deref())
@@ -523,6 +547,7 @@ impl PipelineWorker {
         .bind(output.bedrooms)
         .bind(output.bathrooms)
         .bind(output.property_type.as_deref())
+        .bind(output.condition.as_deref())
         .bind(output.ad_copy.as_deref())
         .bind(output.layout_variation)
         .bind(now)
@@ -638,6 +663,30 @@ fn missing_fields(output: &EnrichmentOutput) -> Vec<&'static str> {
         missing.push("location");
     }
     missing
+}
+
+/// Render a price as raw copy text with thousands separators (Section 26.4):
+/// `"RM "` + grouped integer, no decimals when whole, else two decimals.
+fn format_price_rm(price: f64) -> String {
+    let text = format!("{price:.2}");
+    let (integer, fraction) = text.split_once('.').unwrap_or((text.as_str(), "00"));
+    let (sign, integer) = match integer.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", integer),
+    };
+    let digits: Vec<char> = integer.chars().filter(char::is_ascii_digit).collect();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.iter().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(*digit);
+    }
+    if fraction == "00" {
+        format!("RM {sign}{grouped}")
+    } else {
+        format!("RM {sign}{grouped}.{fraction}")
+    }
 }
 
 fn intervention_reply(missing: &[&str]) -> String {
@@ -830,6 +879,36 @@ mod tests {
     ) {
         seed_enriched_listing(pool, listing_id).await;
         seed_photos(pool, dir, listing_id, count).await;
+    }
+
+    /// `ENRICHED` listing carrying every preview field (Section 26.5) plus two
+    /// downloadable photos on disk.
+    async fn seed_enriched_preview(
+        pool: &SqlitePool,
+        dir: &std::path::Path,
+        listing_id: &str,
+        condition: Option<&str>,
+    ) {
+        let now = db::now_ms();
+        sqlx::query(
+            "INSERT INTO listings
+                 (id, sender_id, source_chat_id, source_message_ids, status, title, price_rm,
+                  location, condition, ad_copy, ingested_at, enriched_at, updated_at,
+                  chat_id, anchor_message_id)
+             VALUES (?, 777, 777, '[10]', 'ENRICHED',
+                     'Double Storey Corner House For Sale in Bercham Ipoh', 680000.0,
+                     'Arena Perpaduan Bayu, Bercham, Ipoh', ?, 'Sample ad copy 🔥',
+                     ?, ?, ?, 777, 10)",
+        )
+        .bind(listing_id)
+        .bind(condition)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed preview listing");
+        seed_photos(pool, dir, listing_id, 2).await;
     }
 
     #[tokio::test]
@@ -1158,10 +1237,17 @@ mod tests {
         db::test_support::cleanup(f.pool, f.dir).await;
     }
 
+    #[test]
+    fn format_price_rm_groups_thousands_and_trims_whole_decimals() {
+        assert_eq!(format_price_rm(680_000.0), "RM 680,000");
+        assert_eq!(format_price_rm(1_800.0), "RM 1,800");
+        assert_eq!(format_price_rm(1_234_567.5), "RM 1,234,567.50");
+    }
+
     #[tokio::test]
     async fn media_ready_sends_review_album_and_ad_copy() {
         let f = fixture().await;
-        seed_enriched_with_photos(&f.pool, &f.dir, "L1", 2).await;
+        seed_enriched_preview(&f.pool, &f.dir, "L1", Some("Fully Furnished")).await;
 
         f.worker.process_one("L1").await.expect("process");
 
@@ -1180,9 +1266,100 @@ mod tests {
             paths,
             &vec![watermarked.join("01.jpg"), watermarked.join("02.jpg")]
         );
-        assert_eq!(caption, "Sample ad copy for review");
+        assert_eq!(caption, "", "album caption must be empty");
+
+        let texts: Vec<String> = f
+            .client
+            .sent_messages()
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Double Storey Corner House For Sale in Bercham Ipoh".to_string(),
+                "Arena Perpaduan Bayu, Bercham, Ipoh".to_string(),
+                "RM 680,000".to_string(),
+                "Fully Furnished".to_string(),
+                "Sample ad copy 🔥".to_string(),
+            ]
+        );
 
         assert_eq!(f.client.reactions(), vec![(777, 10, "👌".to_string())]);
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn media_ready_preview_omits_condition_when_absent() {
+        let f = fixture().await;
+        seed_enriched_preview(&f.pool, &f.dir, "L1", None).await;
+
+        f.worker.process_one("L1").await.expect("process");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM listings WHERE id = 'L1'")
+            .fetch_one(&f.pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "MEDIA_READY");
+
+        let albums = f.client.sent_albums();
+        assert_eq!(albums.len(), 1, "exactly one review album");
+        assert_eq!(albums[0].2, "", "album caption must be empty");
+
+        let texts: Vec<String> = f
+            .client
+            .sent_messages()
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Double Storey Corner House For Sale in Bercham Ipoh".to_string(),
+                "Arena Perpaduan Bayu, Bercham, Ipoh".to_string(),
+                "RM 680,000".to_string(),
+                "Sample ad copy 🔥".to_string(),
+            ],
+            "condition must be skipped when NULL"
+        );
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn media_ready_preview_skips_whitespace_condition() {
+        let f = fixture().await;
+        seed_enriched_preview(&f.pool, &f.dir, "L1", Some("   ")).await;
+
+        f.worker.process_one("L1").await.expect("process");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM listings WHERE id = 'L1'")
+            .fetch_one(&f.pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "MEDIA_READY");
+
+        let albums = f.client.sent_albums();
+        assert_eq!(albums.len(), 1, "exactly one review album");
+        assert_eq!(albums[0].2, "", "album caption must be empty");
+
+        let texts: Vec<String> = f
+            .client
+            .sent_messages()
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Double Storey Corner House For Sale in Bercham Ipoh".to_string(),
+                "Arena Perpaduan Bayu, Bercham, Ipoh".to_string(),
+                "RM 680,000".to_string(),
+                "Sample ad copy 🔥".to_string(),
+            ],
+            "whitespace-only condition must be skipped"
+        );
 
         db::test_support::cleanup(f.pool, f.dir).await;
     }
