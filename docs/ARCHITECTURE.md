@@ -1351,3 +1351,19 @@ prefixes) after the watermarked photo album. No existing publisher/pipeline code
 4. Price renders `RM 680,000` style (thousands separators).
 5. `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` all pass.
 
+
+---
+
+## 26.7 Revision 1 - three-bubble preview (build contract)
+
+Supersedes the five-bubble sequence in Section 26.4/26.5. `location` and `condition`
+extraction AND persistence are unchanged (M4 auto-publishing still needs them); only the
+Telegram preview output is reduced.
+
+- `send_review_preview` sends the watermarked album with an EMPTY caption, then exactly
+  three plain-text bubbles in strict order via `send_plain_text`:
+  1. title, 2. `format_price_rm(price_rm)`, 3. ad_copy description.
+- The separate `location` and `condition` bubbles are removed from the preview sequence.
+- Tests: `MEDIA_READY` preview = album + exactly 3 plain-text messages (title, price,
+  description) in order; the whitespace-condition test is removed (condition is no longer
+  previewed). `cargo fmt --check` / `cargo test` / `cargo clippy --all-targets -- -D warnings`.

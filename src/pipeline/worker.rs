@@ -392,27 +392,20 @@ impl PipelineWorker {
         Ok(())
     }
 
-    /// Best-effort Telegram review preview (Sections 23.3 / 26.4): the
-    /// watermarked album with an empty caption, then one raw (unescaped) message
-    /// per copyable field in strict order.
+    /// Best-effort Telegram review preview (Section 26.7 Revision 1): the
+    /// watermarked album with an empty caption, then exactly three raw
+    /// (unescaped) messages in strict order: title, price, ad copy.
     async fn send_review_preview(&self, listing_id: &str, watermarked: &[PathBuf]) {
-        type PreviewRow = (
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            Option<f64>,
-            Option<String>,
-            Option<String>,
-        );
+        type PreviewRow = (Option<i64>, Option<String>, Option<f64>, Option<String>);
         let row: Option<PreviewRow> = sqlx::query_as(
-            "SELECT chat_id, title, location, price_rm, condition, ad_copy
+            "SELECT chat_id, title, price_rm, ad_copy
              FROM listings WHERE id = ?",
         )
         .bind(listing_id)
         .fetch_optional(&self.pool)
         .await
         .unwrap_or(None);
-        let Some((Some(chat_id), title, location, price_rm, condition, ad_copy)) = row else {
+        let Some((Some(chat_id), title, price_rm, ad_copy)) = row else {
             return;
         };
 
@@ -430,11 +423,9 @@ impl PipelineWorker {
         let field = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
         let mut texts: Vec<String> = Vec::new();
         texts.extend(field(title));
-        texts.extend(field(location));
         if let Some(price) = price_rm {
             texts.push(format_price_rm(price));
         }
-        texts.extend(field(condition));
         texts.extend(field(ad_copy));
 
         for text in texts {
@@ -1278,9 +1269,7 @@ mod tests {
             texts,
             vec![
                 "Double Storey Corner House For Sale in Bercham Ipoh".to_string(),
-                "Arena Perpaduan Bayu, Bercham, Ipoh".to_string(),
                 "RM 680,000".to_string(),
-                "Fully Furnished".to_string(),
                 "Sample ad copy 🔥".to_string(),
             ]
         );
@@ -1317,48 +1306,10 @@ mod tests {
             texts,
             vec![
                 "Double Storey Corner House For Sale in Bercham Ipoh".to_string(),
-                "Arena Perpaduan Bayu, Bercham, Ipoh".to_string(),
                 "RM 680,000".to_string(),
                 "Sample ad copy 🔥".to_string(),
             ],
-            "condition must be skipped when NULL"
-        );
-
-        db::test_support::cleanup(f.pool, f.dir).await;
-    }
-
-    #[tokio::test]
-    async fn media_ready_preview_skips_whitespace_condition() {
-        let f = fixture().await;
-        seed_enriched_preview(&f.pool, &f.dir, "L1", Some("   ")).await;
-
-        f.worker.process_one("L1").await.expect("process");
-
-        let status: String = sqlx::query_scalar("SELECT status FROM listings WHERE id = 'L1'")
-            .fetch_one(&f.pool)
-            .await
-            .expect("status");
-        assert_eq!(status, "MEDIA_READY");
-
-        let albums = f.client.sent_albums();
-        assert_eq!(albums.len(), 1, "exactly one review album");
-        assert_eq!(albums[0].2, "", "album caption must be empty");
-
-        let texts: Vec<String> = f
-            .client
-            .sent_messages()
-            .into_iter()
-            .map(|(_, text)| text)
-            .collect();
-        assert_eq!(
-            texts,
-            vec![
-                "Double Storey Corner House For Sale in Bercham Ipoh".to_string(),
-                "Arena Perpaduan Bayu, Bercham, Ipoh".to_string(),
-                "RM 680,000".to_string(),
-                "Sample ad copy 🔥".to_string(),
-            ],
-            "whitespace-only condition must be skipped"
+            "preview always sends exactly title, price and description"
         );
 
         db::test_support::cleanup(f.pool, f.dir).await;
