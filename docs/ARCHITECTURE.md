@@ -1367,3 +1367,81 @@ Telegram preview output is reduced.
 - Tests: `MEDIA_READY` preview = album + exactly 3 plain-text messages (title, price,
   description) in order; the whitespace-condition test is removed (condition is no longer
   previewed). `cargo fmt --check` / `cargo test` / `cargo clippy --all-targets -- -D warnings`.
+
+---
+
+## 27. Milestone 7 - image corner watermark (build contract)
+
+**Scope:** replace the centred TEXT watermark with an IMAGE overlay composited at the
+bottom-left corner of each property photo. `[media].watermark_text` / `watermark_font` and
+the `listings.watermark_text` persistence stay unchanged (M3 audit still needs them); only
+`[watermark]` config, `WatermarkParams`, `watermark.rs` compositing and the worker's
+`watermark_params` change.
+
+### 27.1 Config (`src/config.rs`, `config/config.example.toml`, `config/config.toml`)
+
+`WatermarkConfig` fields:
+- `image_path: String` - default `"assets/watermark.jpg"`.
+- `position: WatermarkPosition` - default `BottomLeft` (move `#[default]` from `Center` to
+  `BottomLeft`, and update `Default for WatermarkConfig`).
+- `width_ratio: f32` - default `0.34`.
+- `margin_px: u32` - default `16`.
+- `opacity: f32` - alpha multiplier in `0.0..=1.0`, default `0.95` (was `u8` 0-255).
+
+Remove `default_watermark_opacity() -> u8`; rely on `#[serde(default)]` + `Default` impl.
+Validation: `image_path` non-empty; `width_ratio` in `(0.0, 1.0]`; `opacity` in `(0.0, 1.0]`
+(replaces the old `watermark.opacity == 0` check). Update `config.example.toml` AND
+`config/config.toml` `[watermark]` to the five new keys.
+
+### 27.2 `WatermarkParams` (`src/media/watermark.rs`)
+
+Fields: `image_path: PathBuf`, `width_ratio: f32`, `margin_px: u32`, `opacity: f32`,
+`crop_min: u32`, `crop_max: u32`, `brightness: f64`. Remove `text`, `font_path`, `position`
+and the old `opacity: u8`.
+
+### 27.3 Compositing (`src/media/watermark.rs`)
+
+- `load_watermark(path) -> anyhow::Result<RgbaImage>`: `image::open(...).to_rgba8()`, with a
+  clear descriptive error naming the path when missing/unreadable.
+- Pure helper `watermark_size(base_w, base_h, wm_w, wm_h, width_ratio, margin_px) ->
+  (u32, u32)`: target_w = `(base_w * width_ratio).round()`, max(1), min(base_w - 2*margin_px,
+  at least 1); target_h proportional to the watermark aspect (max 1), clamped to
+  base_h - 2*margin_px, then target_w re-derived from target_h to preserve aspect ratio.
+  The overlay must never exceed the base bounds.
+- Resize with `image::imageops::resize(..., FilterType::Lanczos3)`.
+- Scale each pixel's alpha channel by `opacity` (clamp 0..255).
+- Composite `image::imageops::overlay(canvas, wm, x, y)` with `x = margin_px` and
+  `y = base_height.saturating_sub(target_h + margin_px)` (bottom-left).
+- Keep order: overlay -> `apply_brightness` -> `crop_edges` -> `encode_jpeg`.
+- Remove ab_glyph/imageproc imports, `load_font`, `draw_watermark`, the text constants and
+  the `WatermarkPosition` import; remove `ab_glyph` + `imageproc` from `Cargo.toml`.
+
+### 27.4 Worker (`src/pipeline/worker.rs::watermark_params`)
+
+Build `WatermarkParams` from `app.watermark.image_path / width_ratio / margin_px / opacity`
+plus `media.perturb_crop_px` and `media.perturb_brightness`. Stop reading
+`effective_watermark_text` / `watermark_font` / `position` here (still used elsewhere).
+
+### 27.5 Tests (`src/media/watermark.rs`, `src/config.rs`)
+
+- Add `write_watermark_fixture(dir) -> PathBuf` (small solid-colour PNG) and change `params()`
+  to `params(image_path: &Path)` (opacity `0.95`, width_ratio `0.34`, margin `16`,
+  crop `1..=2`, brightness `0.01`); update every existing call site.
+- Replace `missing_font_falls_back_to_the_embedded_asset` with
+  `missing_watermark_image_returns_descriptive_error` (assert the error names the path).
+- Add `watermark_size_is_proportional_and_clamped` (pure helper, concrete numbers).
+- Add `watermark_is_resized_and_placed_bottom_left_without_touching_center`: solid grey base,
+  solid red watermark, opacity `1.0`, crop `0`, brightness `0.0`; assert a bottom-left pixel
+  equals the watermark colour and the centre pixel equals the base colour.
+- Remove the now-meaningless `empty_text_is_allowed_and_still_encodes`.
+- Update config tests for the new defaults and new `width_ratio`/`opacity` validation.
+
+### 27.6 Acceptance criteria
+
+1. `[watermark]` parses the five keys with the documented defaults; invalid `width_ratio` or
+   `opacity` is rejected.
+2. A missing/unreadable watermark image returns a descriptive error (no panic).
+3. The overlay is resized proportionally (Lanczos3), clamped to fit, and composited at the
+   bottom-left corner without touching centre pixels; opacity blends correctly.
+4. Text/font watermark code and its two dependencies are removed; `cargo fmt --check`,
+   `cargo test`, `cargo clippy --all-targets -- -D warnings` all pass.

@@ -1,9 +1,10 @@
-//! Dynamic watermark + anti-duplicate perturbation (Section 22.4).
+//! Dynamic watermark + anti-duplicate perturbation (Section 27).
 //!
-//! The effective text is drawn in white over a dark offset shadow, then every
-//! image gets a fresh micro-perturbation (brightness jitter + random edge crop)
-//! and is re-encoded as JPEG - which strips all metadata by construction. Raw
-//! originals are never modified; outputs are written as `01.jpg`, `02.jpg`, ...
+//! A configured watermark image is resized proportionally and composited at the
+//! bottom-left corner, then every image gets a fresh micro-perturbation
+//! (brightness jitter + random edge crop) and is re-encoded as JPEG - which
+//! strips all metadata by construction. Raw originals are never modified;
+//! outputs are written as `01.jpg`, `02.jpg`, ...
 //!
 //! The whole public surface is consumed by the M3 worker (Section 22.5), so the
 //! dead-code lint is silenced for this module only - the same pattern used by
@@ -13,34 +14,20 @@
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use ab_glyph::{FontVec, PxScale};
 use anyhow::Context;
 use image::codecs::jpeg::JpegEncoder;
-use image::{Rgba, RgbaImage};
-use imageproc::drawing::{draw_text_mut, text_size};
+use image::RgbaImage;
 
-use crate::config::WatermarkPosition;
-
-/// Rendered text height in pixels (matches the Tauri reference implementation).
-const WATERMARK_TEXT_HEIGHT: f32 = 60.0;
-/// Baseline-to-baseline distance as a multiple of the text height.
-const WATERMARK_LINE_SPACING: f32 = 1.2;
-/// Distance from the image edge for the non-centred anchors.
-const WATERMARK_MARGIN: i32 = 16;
-/// Shadow offset in pixels (down and to the right).
-const SHADOW_OFFSET: i32 = 3;
 /// Output JPEG quality (Section 22.4).
 const JPEG_QUALITY: u8 = 90;
-/// Bundled fallback font, embedded so tests never depend on the working directory.
-const FALLBACK_FONT: &[u8] = include_bytes!("../../assets/font.ttf");
 
-/// Watermark rendering inputs (Section 22.4 / 22.7).
+/// Watermark rendering inputs (Section 27.2).
 #[derive(Debug, Clone)]
 pub struct WatermarkParams {
-    pub text: String,
-    pub font_path: PathBuf,
-    pub opacity: u8,
-    pub position: WatermarkPosition,
+    pub image_path: PathBuf,
+    pub width_ratio: f32,
+    pub margin_px: u32,
+    pub opacity: f32,
     pub crop_min: u32,
     pub crop_max: u32,
     pub brightness: f64,
@@ -108,13 +95,40 @@ pub fn watermark_one(
     params: &WatermarkParams,
     perturb: &Perturbation,
 ) -> anyhow::Result<()> {
-    let font = load_font(&params.font_path)?;
+    let watermark = load_watermark(&params.image_path)?;
 
     let decoded = image::open(source)
         .with_context(|| format!("failed to open source image {}", source.display()))?;
     let mut canvas = decoded.to_rgba8();
 
-    draw_watermark(&mut canvas, &font, params);
+    let (target_w, target_h) = watermark_size(
+        canvas.width(),
+        canvas.height(),
+        watermark.width(),
+        watermark.height(),
+        params.width_ratio,
+        params.margin_px,
+    );
+
+    let mut resized = image::imageops::resize(
+        &watermark,
+        target_w,
+        target_h,
+        image::imageops::FilterType::Lanczos3,
+    );
+    scale_alpha(&mut resized, params.opacity);
+
+    // Clamp both axes so an unbounded `margin_px` can never push the overlay
+    // origin outside the canvas (`imageops::overlay` panics on negative/out-of-range).
+    let x = params
+        .margin_px
+        .min(canvas.width().saturating_sub(target_w));
+    let y = canvas
+        .height()
+        .saturating_sub(target_h)
+        .saturating_sub(params.margin_px);
+    image::imageops::overlay(&mut canvas, &resized, i64::from(x), i64::from(y));
+
     apply_brightness(&mut canvas, perturb.brightness_delta);
     let cropped = crop_edges(&mut canvas, perturb.crop_px);
     let rgb = image::DynamicImage::ImageRgba8(cropped).into_rgb8();
@@ -122,94 +136,55 @@ pub fn watermark_one(
     encode_jpeg(&rgb, destination)
 }
 
-/// Load the configured font, falling back to the embedded asset when the file
-/// is missing, unreadable or empty (Section 22.4).
-fn load_font(path: &Path) -> anyhow::Result<FontVec> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) if !bytes.is_empty() => bytes,
-        Ok(_) => {
-            tracing::debug!(
-                path = %path.display(),
-                "watermark font is empty; using embedded fallback"
-            );
-            FALLBACK_FONT.to_vec()
-        }
-        Err(err) => {
-            tracing::debug!(
-                path = %path.display(),
-                error = %err,
-                "watermark font is unreadable; using embedded fallback"
-            );
-            FALLBACK_FONT.to_vec()
-        }
-    };
-
-    FontVec::try_from_vec(bytes).map_err(|err| anyhow::anyhow!("invalid watermark font: {err}"))
+/// Load the configured watermark image, naming the path on failure (Section 27.3).
+fn load_watermark(path: &Path) -> anyhow::Result<RgbaImage> {
+    let decoded = image::open(path).with_context(|| {
+        format!(
+            "watermark image not found or unreadable: {}",
+            path.display()
+        )
+    })?;
+    Ok(decoded.to_rgba8())
 }
 
-/// Draw every non-empty line of the watermark, centred per measured width.
-fn draw_watermark(canvas: &mut RgbaImage, font: &FontVec, params: &WatermarkParams) {
-    let lines: Vec<&str> = params
-        .text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-
-    if lines.is_empty() {
-        return;
+/// Target overlay size: `width_ratio` of the base width, proportional height,
+/// clamped so the overlay never exceeds the base bounds (Section 27.3).
+fn watermark_size(
+    base_w: u32,
+    base_h: u32,
+    wm_w: u32,
+    wm_h: u32,
+    width_ratio: f32,
+    margin_px: u32,
+) -> (u32, u32) {
+    if wm_w == 0 || wm_h == 0 || base_w == 0 || base_h == 0 {
+        return (1, 1);
     }
 
-    let scale = PxScale::from(WATERMARK_TEXT_HEIGHT);
-    let line_height = (WATERMARK_TEXT_HEIGHT * WATERMARK_LINE_SPACING) as i32;
-    let block_height = line_height * lines.len() as i32;
+    let max_w = base_w.saturating_sub(2 * margin_px).max(1);
+    let max_h = base_h.saturating_sub(2 * margin_px).max(1);
 
-    let widths: Vec<i32> = lines
-        .iter()
-        .map(|line| text_size(scale, font, line).0 as i32)
-        .collect();
-    let block_width = widths.iter().copied().max().unwrap_or(0);
+    let mut target_w = ((base_w as f32 * width_ratio).round() as u32)
+        .max(1)
+        .min(max_w);
+    let mut target_h = (((wm_h as f32 / wm_w as f32) * target_w as f32).round() as u32).max(1);
 
-    let canvas_width = canvas.width() as i32;
-    let canvas_height = canvas.height() as i32;
+    if target_h > max_h {
+        target_h = max_h;
+        target_w = (((wm_w as f32 / wm_h as f32) * target_h as f32).round() as u32)
+            .max(1)
+            .min(max_w);
+    }
 
-    let (block_x, block_y) = match params.position {
-        WatermarkPosition::Center => (
-            (canvas_width - block_width) / 2,
-            (canvas_height - block_height) / 2,
-        ),
-        WatermarkPosition::BottomRight => (
-            canvas_width - block_width - WATERMARK_MARGIN,
-            canvas_height - block_height - WATERMARK_MARGIN,
-        ),
-        WatermarkPosition::BottomLeft => (
-            WATERMARK_MARGIN,
-            canvas_height - block_height - WATERMARK_MARGIN,
-        ),
-        WatermarkPosition::TopRight => (
-            canvas_width - block_width - WATERMARK_MARGIN,
-            WATERMARK_MARGIN,
-        ),
-        WatermarkPosition::TopLeft => (WATERMARK_MARGIN, WATERMARK_MARGIN),
-    };
+    (target_w, target_h)
+}
 
-    let text_color = Rgba([255, 255, 255, params.opacity]);
-    let shadow_alpha = (u16::from(params.opacity) * 150 / 255) as u8;
-    let shadow_color = Rgba([0, 0, 0, shadow_alpha]);
-
-    for (index, line) in lines.iter().enumerate() {
-        let line_x = block_x + (block_width - widths[index]) / 2;
-        let line_y = block_y + line_height * index as i32;
-
-        draw_text_mut(
-            canvas,
-            shadow_color,
-            line_x + SHADOW_OFFSET,
-            line_y + SHADOW_OFFSET,
-            scale,
-            font,
-            line,
-        );
-        draw_text_mut(canvas, text_color, line_x, line_y, scale, font, line);
+/// Multiply every alpha channel by `opacity`, clamping to `[0, 255]`.
+fn scale_alpha(image: &mut RgbaImage, opacity: f32) {
+    let factor = opacity.clamp(0.0, 1.0);
+    for pixel in image.pixels_mut() {
+        let alpha = (f32::from(pixel.0[3]) * factor).round().clamp(0.0, 255.0) as u8;
+        pixel.0[3] = alpha;
     }
 }
 
@@ -295,12 +270,20 @@ mod tests {
         Ok(())
     }
 
-    fn params() -> WatermarkParams {
+    /// Small solid-colour PNG standing in for `assets/watermark.jpg`.
+    fn write_watermark_fixture(dir: &Path) -> PathBuf {
+        let path = dir.join("watermark.png");
+        let image = RgbImage::from_pixel(100, 40, Rgb([255, 0, 0]));
+        image.save(&path).expect("write watermark fixture");
+        path
+    }
+
+    fn params(image_path: &Path) -> WatermarkParams {
         WatermarkParams {
-            text: "Test Agent\n000-0000000".to_string(),
-            font_path: PathBuf::from("assets/font.ttf"),
-            opacity: 230,
-            position: WatermarkPosition::Center,
+            image_path: image_path.to_path_buf(),
+            width_ratio: 0.34,
+            margin_px: 16,
+            opacity: 0.95,
             crop_min: 1,
             crop_max: 2,
             brightness: 0.01,
@@ -343,10 +326,26 @@ mod tests {
     }
 
     #[test]
+    fn watermark_size_is_proportional_and_clamped() {
+        // Width follows `width_ratio`; height follows the watermark aspect.
+        assert_eq!(watermark_size(400, 400, 100, 40, 0.5, 0), (200, 80));
+
+        // Too tall: height is clamped to the available area, width re-derived.
+        assert_eq!(watermark_size(400, 400, 100, 400, 0.5, 0), (100, 400));
+
+        // Margins shrink the available width.
+        assert_eq!(watermark_size(400, 400, 100, 40, 1.0, 16), (368, 147));
+
+        // Degenerate watermark dimensions never divide by zero.
+        assert_eq!(watermark_size(400, 400, 0, 40, 0.5, 16), (1, 1));
+    }
+
+    #[test]
     fn watermark_batch_writes_ordered_jpegs_and_keeps_sources() -> anyhow::Result<()> {
         let dir = temp_dir("batch");
         let source_dir = dir.join("src");
         std::fs::create_dir_all(&source_dir)?;
+        let watermark = write_watermark_fixture(&dir);
 
         let source_a = source_dir.join("a.png");
         let source_b = source_dir.join("b.png");
@@ -360,7 +359,7 @@ mod tests {
         let results = watermark_batch(
             &[source_a.clone(), source_b.clone()],
             &out_dir,
-            &params(),
+            &params(&watermark),
             &mut rng,
         )?;
 
@@ -392,6 +391,7 @@ mod tests {
     #[test]
     fn watermark_one_applies_the_exact_crop() -> anyhow::Result<()> {
         let dir = temp_dir("one");
+        let watermark = write_watermark_fixture(&dir);
         let source = dir.join("src.png");
         write_noise(&source, 400, 4)?;
 
@@ -399,7 +399,7 @@ mod tests {
         watermark_one(
             &source,
             &cropped_two,
-            &params(),
+            &params(&watermark),
             &Perturbation {
                 crop_px: 2,
                 brightness_delta: 0.0,
@@ -411,7 +411,7 @@ mod tests {
         watermark_one(
             &source,
             &cropped_one,
-            &params(),
+            &params(&watermark),
             &Perturbation {
                 crop_px: 1,
                 brightness_delta: 0.0,
@@ -426,6 +426,7 @@ mod tests {
     #[test]
     fn oversized_crop_is_clamped_to_one_remaining_pixel() -> anyhow::Result<()> {
         let dir = temp_dir("clamp");
+        let watermark = write_watermark_fixture(&dir);
         let source = dir.join("src.png");
         write_noise(&source, 4, 5)?;
 
@@ -433,7 +434,7 @@ mod tests {
         watermark_one(
             &source,
             &destination,
-            &params(),
+            &params(&watermark),
             &Perturbation {
                 crop_px: 64,
                 brightness_delta: 0.0,
@@ -451,6 +452,7 @@ mod tests {
     #[test]
     fn encoded_output_contains_no_exif_marker() -> anyhow::Result<()> {
         let dir = temp_dir("exif");
+        let watermark = write_watermark_fixture(&dir);
         let source = dir.join("src.png");
         write_noise(&source, 400, 6)?;
 
@@ -458,7 +460,7 @@ mod tests {
         watermark_one(
             &source,
             &destination,
-            &params(),
+            &params(&watermark),
             &Perturbation {
                 crop_px: 1,
                 brightness_delta: 0.005,
@@ -482,54 +484,110 @@ mod tests {
     }
 
     #[test]
-    fn missing_font_falls_back_to_the_embedded_asset() -> anyhow::Result<()> {
-        let dir = temp_dir("font");
+    fn missing_watermark_image_returns_descriptive_error() -> anyhow::Result<()> {
+        let dir = temp_dir("missing-watermark");
         let source = dir.join("src.png");
         write_noise(&source, 400, 8)?;
 
-        let mut params = params();
-        params.font_path = PathBuf::from("definitely/missing.ttf");
-
-        let destination = dir.join("fallback.jpg");
-        watermark_one(
+        let missing = dir.join("definitely-missing.png");
+        let destination = dir.join("out.jpg");
+        let err = watermark_one(
             &source,
             &destination,
-            &params,
+            &params(&missing),
             &Perturbation {
                 crop_px: 1,
                 brightness_delta: 0.0,
             },
-        )?;
+        )
+        .expect_err("a missing watermark image must fail");
 
-        let decoded = image::open(&destination)?;
-        assert_eq!(decoded.dimensions(), (398, 398));
+        assert!(
+            err.to_string().contains(&missing.display().to_string()),
+            "error must name the missing path, got: {err}"
+        );
+        assert!(!destination.exists(), "no output must be written");
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 
     #[test]
-    fn empty_text_is_allowed_and_still_encodes() -> anyhow::Result<()> {
-        let dir = temp_dir("empty-text");
+    fn watermark_survives_tiny_base_and_huge_margin() -> anyhow::Result<()> {
+        let dir = temp_dir("huge-margin");
+        let watermark = write_watermark_fixture(&dir);
         let source = dir.join("src.png");
-        write_noise(&source, 200, 10)?;
+        RgbImage::from_pixel(4, 4, Rgb([128, 128, 128])).save(&source)?;
 
-        let mut params = params();
-        params.text = "\n\n".to_string();
-        params.position = WatermarkPosition::BottomRight;
+        let mut render = params(&watermark);
+        render.margin_px = 1000;
+        render.brightness = 0.0;
 
         let destination = dir.join("out.jpg");
         watermark_one(
             &source,
             &destination,
-            &params,
+            &render,
             &Perturbation {
                 crop_px: 0,
                 brightness_delta: 0.0,
             },
         )?;
 
-        assert_eq!(image::open(&destination)?.dimensions(), (200, 200));
+        let decoded = image::open(&destination)?;
+        assert!(decoded.width() >= 1);
+        assert!(decoded.height() >= 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn watermark_is_resized_and_placed_bottom_left_without_touching_center() -> anyhow::Result<()> {
+        let dir = temp_dir("placement");
+        let watermark = write_watermark_fixture(&dir);
+
+        let source = dir.join("src.png");
+        RgbImage::from_pixel(400, 400, Rgb([128, 128, 128])).save(&source)?;
+
+        let mut render = params(&watermark);
+        render.width_ratio = 0.5;
+        render.margin_px = 0;
+        render.opacity = 1.0;
+        render.crop_min = 0;
+        render.crop_max = 0;
+        render.brightness = 0.0;
+
+        let destination = dir.join("out.jpg");
+        watermark_one(
+            &source,
+            &destination,
+            &render,
+            &Perturbation {
+                crop_px: 0,
+                brightness_delta: 0.0,
+            },
+        )?;
+
+        let decoded = image::open(&destination)?.to_rgb8();
+        assert_eq!(decoded.dimensions(), (400, 400));
+
+        let bottom_left = decoded.get_pixel(5, 395);
+        assert!(
+            bottom_left[0] > 200 && bottom_left[1] < 60 && bottom_left[2] < 60,
+            "expected the red watermark at the bottom-left, got {bottom_left:?}"
+        );
+
+        let centre = decoded.get_pixel(200, 200);
+        let grey_drift = centre
+            .0
+            .iter()
+            .map(|channel| i32::from(*channel) - 128)
+            .collect::<Vec<_>>();
+        assert!(
+            grey_drift.iter().all(|delta| delta.abs() <= 16),
+            "centre must stay grey, got {centre:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

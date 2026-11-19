@@ -23,10 +23,8 @@ ulid = "1"
 anyhow = "1"
 thiserror = "2"
 rand = "0.8"
-# M3 media pipeline (Section 22.2 / 22.4): stage-1 filter + watermark rendering.
+# M3 media pipeline (Section 22.2 / 27.3): stage-1 filter + image watermark overlay.
 image = "0.25"
-imageproc = "0.25"
-ab_glyph = "0.2"
 # M4 publisher (Section 24.5): Chrome DevTools Protocol over WebSocket.
 tokio-tungstenite = "0.24"
 futures-util = "0.3"

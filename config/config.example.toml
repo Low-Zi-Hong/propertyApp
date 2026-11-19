@@ -45,8 +45,11 @@ strip_exif = true
 max_photos = 8                  # selected, watermarked photo set size cap
 
 [watermark]
-opacity = 230                   # text alpha 0-255
-position = "center"             # center | bottom_right | bottom_left | top_right | top_left
+image_path = "assets/watermark.jpg"   # bottom-left overlay image
+position = "bottom_left"              # only "bottom-left" is supported in this revision
+width_ratio = 0.34                    # overlay width as a fraction of the photo width
+margin_px = 16                        # gap from the photo edges in pixels
+opacity = 0.95                        # overlay alpha multiplier 0.0-1.0
 
 [rate_limit]
 min_delay_min = 8

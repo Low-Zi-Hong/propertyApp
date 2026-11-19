@@ -198,13 +198,13 @@ impl Default for MediaConfig {
     }
 }
 
-/// Watermark text anchor (Section 22.7).
+/// Watermark overlay image anchor (Section 22.7 / 27.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WatermarkPosition {
-    #[default]
     Center,
     BottomRight,
+    #[default]
     BottomLeft,
     TopRight,
     TopLeft,
@@ -213,23 +213,27 @@ pub enum WatermarkPosition {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WatermarkConfig {
-    /// Text alpha, 0-255.
-    #[serde(default = "default_watermark_opacity")]
-    pub opacity: u8,
+    /// Watermark overlay image path (Section 27.1).
+    pub image_path: String,
     pub position: WatermarkPosition,
+    /// Overlay width as a fraction of the base image width.
+    pub width_ratio: f32,
+    /// Distance kept from the base image edges, in pixels.
+    pub margin_px: u32,
+    /// Alpha multiplier in `0.0..=1.0`.
+    pub opacity: f32,
 }
 
 impl Default for WatermarkConfig {
     fn default() -> Self {
         Self {
-            opacity: default_watermark_opacity(),
-            position: WatermarkPosition::Center,
+            image_path: "assets/watermark.jpg".to_string(),
+            position: WatermarkPosition::BottomLeft,
+            width_ratio: 0.34,
+            margin_px: 16,
+            opacity: 0.95,
         }
     }
-}
-
-fn default_watermark_opacity() -> u8 {
-    230
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -664,8 +668,26 @@ impl AppConfig {
         if self.gc.interval_hours == 0 {
             return Err(ConfigError::invalid("gc.interval_hours", "must be >= 1"));
         }
-        if self.watermark.opacity == 0 {
-            return Err(ConfigError::invalid("watermark.opacity", "must be >= 1"));
+        if self.watermark.position != WatermarkPosition::BottomLeft {
+            return Err(ConfigError::invalid(
+                "watermark.position",
+                "only \"bottom-left\" is supported",
+            ));
+        }
+        if self.watermark.image_path.trim().is_empty() {
+            return Err(ConfigError::Missing("watermark.image_path"));
+        }
+        if !(self.watermark.width_ratio > 0.0 && self.watermark.width_ratio <= 1.0) {
+            return Err(ConfigError::invalid(
+                "watermark.width_ratio",
+                "must be in (0.0, 1.0]",
+            ));
+        }
+        if !(self.watermark.opacity > 0.0 && self.watermark.opacity <= 1.0) {
+            return Err(ConfigError::invalid(
+                "watermark.opacity",
+                "must be in (0.0, 1.0]",
+            ));
         }
         Ok(())
     }
@@ -1123,8 +1145,11 @@ perturb_crop_px = [1, 2]
 max_photos = 8
 
 [watermark]
-opacity = 230
-position = "center"
+image_path = "assets/watermark.jpg"
+position = "bottom_left"
+width_ratio = 0.34
+margin_px = 16
+opacity = 0.95
 
 [rate_limit]
 min_delay_min = 8
@@ -1518,8 +1543,11 @@ mod tests {
     #[test]
     fn media_and_vision_defaults_apply_when_absent() {
         let config = AppConfig::from_toml_str("[watermark]\n").expect("parse");
-        assert_eq!(config.watermark.opacity, 230);
-        assert_eq!(config.watermark.position, WatermarkPosition::Center);
+        assert_eq!(config.watermark.image_path, "assets/watermark.jpg");
+        assert_eq!(config.watermark.position, WatermarkPosition::BottomLeft);
+        assert_eq!(config.watermark.width_ratio, 0.34);
+        assert_eq!(config.watermark.margin_px, 16);
+        assert_eq!(config.watermark.opacity, 0.95);
 
         // Existing hot-reloadable configs predate the M3-revision keys: every new
         // value must default (Section 23.4).
@@ -1534,9 +1562,9 @@ mod tests {
     #[test]
     fn watermark_position_parses_snake_case() {
         let config =
-            AppConfig::from_toml_str("[watermark]\nopacity = 128\nposition = \"bottom_right\"\n")
+            AppConfig::from_toml_str("[watermark]\nopacity = 0.8\nposition = \"bottom_right\"\n")
                 .expect("parse");
-        assert_eq!(config.watermark.opacity, 128);
+        assert_eq!(config.watermark.opacity, 0.8);
         assert_eq!(config.watermark.position, WatermarkPosition::BottomRight);
     }
 
@@ -1548,9 +1576,38 @@ mod tests {
         assert!(err.to_string().contains("media.max_photos"));
 
         config.media.max_photos = 8;
-        config.watermark.opacity = 0;
+        config.watermark.opacity = 0.0;
         let err = config.validate().expect_err("zero opacity must fail");
         assert!(err.to_string().contains("watermark.opacity"));
+
+        config.watermark.opacity = 0.95;
+        config.watermark.width_ratio = 0.0;
+        let err = config.validate().expect_err("zero width_ratio must fail");
+        assert!(err.to_string().contains("watermark.width_ratio"));
+
+        config.watermark.width_ratio = 1.5;
+        let err = config
+            .validate()
+            .expect_err("width_ratio above 1.0 must fail");
+        assert!(err.to_string().contains("watermark.width_ratio"));
+
+        config.watermark.width_ratio = 1.0;
+        config.validate().expect("boundary values are valid");
+    }
+
+    #[test]
+    fn validation_requires_bottom_left_watermark_position() {
+        let mut config = test_app_config();
+        config.watermark.position = WatermarkPosition::TopRight;
+        let err = config
+            .validate()
+            .expect_err("unsupported watermark position must fail");
+        assert!(err.to_string().contains("watermark.position"));
+
+        config.watermark.position = WatermarkPosition::BottomLeft;
+        config
+            .validate()
+            .expect("bottom-left is the supported position");
     }
 
     #[test]

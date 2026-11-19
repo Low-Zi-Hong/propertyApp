@@ -27,13 +27,13 @@ const POLL_TICK: Duration = Duration::from_secs(2);
 /// Debounce grace beyond `media_group_window_secs` before a listing is eligible.
 const DEBOUNCE_GRACE_MS: i64 = 2_000;
 
-/// Watermark rendering inputs from the live config (Section 22.4).
+/// Watermark rendering inputs from the live config (Section 27.4).
 fn watermark_params(app: &AppConfig) -> WatermarkParams {
     WatermarkParams {
-        text: effective_watermark_text(app),
-        font_path: std::path::PathBuf::from(&app.media.watermark_font),
+        image_path: PathBuf::from(&app.watermark.image_path),
+        width_ratio: app.watermark.width_ratio,
+        margin_px: app.watermark.margin_px,
         opacity: app.watermark.opacity,
-        position: app.watermark.position,
         crop_min: app.media.perturb_crop_px[0],
         crop_max: app.media.perturb_crop_px[1],
         brightness: app.media.perturb_brightness,
