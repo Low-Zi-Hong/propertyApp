@@ -1,31 +1,66 @@
-# Logs
-logs
+# ---------------------------------------------------------------------------
+# Secret & runtime configuration - NEVER commit
+# Copy the *.example.* templates instead.
+# ---------------------------------------------------------------------------
+/config/config.toml
+/config/selectors.json
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Runtime state (SQLite DB, downloaded/processed media, Chrome profile, logs)
+# ---------------------------------------------------------------------------
+/data/
+*.db-shm
+*.db-wal
+
+# ---------------------------------------------------------------------------
+# Rust build artifacts
+# ---------------------------------------------------------------------------
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+
+# ---------------------------------------------------------------------------
+# Local tool output & logs
+# ---------------------------------------------------------------------------
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+clippy_out.txt
+fmt_out.txt
+test_out.txt
+*_out.txt
 
-node_modules
-dist
-dist-ssr
+# Screen recordings / scratch captures
+Recording_*.mht
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# ---------------------------------------------------------------------------
+# Node / Tauri legacy reference & any frontend tooling
+# ---------------------------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
 *.local
+**/src-tauri/target/
+**/src-tauri/gen/
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
+# ---------------------------------------------------------------------------
+# OS & editor clutter
+# ---------------------------------------------------------------------------
 .DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+Thumbs.db
+desktop.ini
+.idea/
+*.swp
+*.swo
+*~
 
-Save/
-src/assets
-src-tauri/capabilities
-src-tauri/gen
-src-tauri/icons
-src-tauri/target
+# ---------------------------------------------------------------------------
+# Keep Cargo.lock (binary crate) and propertyApp-main/.vscode/extensions.json
+# ---------------------------------------------------------------------------
