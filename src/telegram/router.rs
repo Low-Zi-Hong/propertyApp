@@ -28,6 +28,8 @@ pub enum Command {
     Publish,
     Retry,
     Done,
+    Resend,
+    Stats,
     Log,
     Restart,
     Console,
@@ -67,6 +69,8 @@ impl Command {
             "publish" => Command::Publish,
             "retry" => Command::Retry,
             "done" => Command::Done,
+            "resend" => Command::Resend,
+            "stats" => Command::Stats,
             // DevOps self-maintenance commands (Section 28.4); gated separately
             // by `devops_authorized`.
             "log" => Command::Log,
@@ -97,6 +101,8 @@ impl Command {
             Command::Publish => "/publish",
             Command::Retry => "/retry",
             Command::Done => "/done",
+            Command::Resend => "/resend",
+            Command::Stats => "/stats",
             Command::Log => "/log",
             Command::Restart => "/restart",
             Command::Console => "/console",
@@ -202,6 +208,8 @@ impl CommandRouter {
         let cooldown_minutes = cooldown_remaining.saturating_add(59_999) / 60_000;
 
         let mut new_paused: Option<bool> = None;
+        // Today's usage drives both the `/status` line and `/stats` (Section 29.4).
+        let usage_today = db::usage_today(&self.pool).await?;
         // `/start` and `/resume` are the documented recovery path out of an
         // account-risk trip (Section 24.6): they clear `circuit_open` too - but
         // only after the cooldown window has passed. `/resume force` bypasses
@@ -258,11 +266,48 @@ impl CommandRouter {
                 paused,
                 circuit_open,
                 &counts,
-                hourly,
-                daily,
+                (hourly, daily),
                 &app,
                 publisher_enabled,
+                &usage_today,
             )?,
+            Command::Stats => {
+                let since = db::local_date_utc8_days_ago(6);
+                let week = db::usage_since(&self.pool, &since).await?;
+                let all = db::usage_all(&self.pool).await?;
+                stats_reply(&usage_today, &week, &all)
+            }
+            Command::Resend => {
+                // Replay the sender's newest completed listing (Section 29.6).
+                // `send_listing_preview` re-renders exactly what the M3 worker
+                // sent at MEDIA_READY.
+                match db::latest_resendable(&self.pool, sender_id).await? {
+                    Some(id) => {
+                        let watermarked =
+                            crate::telegram::preview::watermarked_photos(&app.media_root(), &id);
+                        if watermarked.is_empty() {
+                            "No previous listing available to resend.".to_string()
+                        } else {
+                            match crate::telegram::preview::send_listing_preview(
+                                client,
+                                &self.pool,
+                                &id,
+                                &watermarked,
+                            )
+                            .await
+                            {
+                                Ok(true) => "Resent your latest listing.".to_string(),
+                                Ok(false) => "No previous listing available to resend.".to_string(),
+                                Err(err) => {
+                                    warn!(listing_id = %id, error = %err, "cannot resend the latest listing");
+                                    "Could not resend the latest listing.".to_string()
+                                }
+                            }
+                        }
+                    }
+                    None => "No previous listing available to resend.".to_string(),
+                }
+            }
             Command::Help => help_reply(),
             Command::Reload => match self.config.reload() {
                 Ok(_) => "Reloaded.".to_string(),
@@ -802,12 +847,17 @@ fn status_reply(
     paused: bool,
     circuit_open: bool,
     counts: &QueueCounts,
-    hourly: i64,
-    daily: i64,
+    quota: (i64, i64),
     app: &AppConfig,
     publisher_enabled: bool,
+    usage: &db::UsageRow,
 ) -> anyhow::Result<String> {
+    let (hourly, daily) = quota;
     let status = format!("Status: {}", if paused { "PAUSED" } else { "RUNNING" });
+    let today = format!(
+        "Today: {} listings, {} images",
+        usage.listings_count, usage.images_processed
+    );
     if !publisher_enabled {
         // MVP manual-publishing mode (Section 25.3): quota, circuit and publish
         // window do not apply, so those lines are omitted entirely.
@@ -822,6 +872,7 @@ fn status_reply(
                 counts.needs_intervention
             ),
             format!("Queue depth: {}", counts.depth()),
+            today,
             "Publisher: DISABLED (MVP mode)".to_string(),
         ]
         .join("\n"));
@@ -841,6 +892,7 @@ fn status_reply(
             counts.needs_intervention
         ),
         format!("Queue depth: {}", counts.depth()),
+        today,
         format!(
             "Quota: hourly {}/{} (remaining {}), daily {}/{} (remaining {})",
             hourly,
@@ -854,6 +906,23 @@ fn status_reply(
         format!("Publish window: {}", escape_html(&window)),
     ];
     Ok(lines.join("\n"))
+}
+
+/// One `/stats` row (Section 29.4): listings, images and tokens processed.
+fn usage_line(label: &str, row: &db::UsageRow) -> String {
+    format!(
+        "{label}: {} listings, {} images, {} prompt tok, {} completion tok",
+        row.listings_count, row.images_processed, row.prompt_tokens, row.completion_tokens
+    )
+}
+
+fn stats_reply(today: &db::UsageRow, week: &db::UsageRow, all: &db::UsageRow) -> String {
+    [
+        format!("\u{1f4ca} {}", usage_line("Today", today)),
+        usage_line("Last 7 days", week),
+        usage_line("All-time", all),
+    ]
+    .join("\n")
 }
 
 fn help_reply() -> String {
@@ -870,6 +939,8 @@ fn help_reply() -> String {
         "/publish - publish the MEDIA_READY queue (blocked while the circuit is OPEN)",
         "/retry - move NEEDS_INTERVENTION listings back to MEDIA_READY",
         "/done - mark a listing manually published (optional listing id)",
+        "/resend - re-send the newest listing preview (album + text)",
+        "/stats - today, last 7 days and all-time usage",
         "/log - show the newest log lines (optional count, default 30)",
         "/restart - restart the daemon without rebuilding",
         "/console - run one OpenCode instruction in the repo (devops admin only)",
@@ -1015,6 +1086,8 @@ mod tests {
             Command::parse_with_arg("/done L123"),
             Some((Command::Done, Some("L123".to_string())))
         );
+        assert_eq!(Command::parse("/stats"), Some(Command::Stats));
+        assert_eq!(Command::parse("/resend@PropBot"), Some(Command::Resend));
     }
 
     #[tokio::test]
@@ -1379,6 +1452,10 @@ mod tests {
         assert!(reply.contains("Status: PAUSED"));
         assert!(reply.contains("Queue: INGESTED 0"));
         assert!(reply.contains("Queue depth: 0"));
+        assert!(
+            reply.contains("Today: 0 listings, 0 images"),
+            "/status must include today's usage: {reply}"
+        );
         assert!(reply.contains("Quota: hourly 0/5"));
         assert!(reply.contains("Circuit: CLOSED"));
         assert!(reply.contains("Publish window: "));
@@ -1967,5 +2044,161 @@ mod tests {
         );
 
         db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn stats_and_resend_are_gated_for_non_admin_senders() {
+        let mut config = test_app_config();
+        config.telegram.allowed_sender_ids = vec![999];
+        let f = fixture_with(config).await;
+
+        for (update_id, text, expected) in [(760, "/stats", "/stats"), (761, "/resend", "/resend")]
+        {
+            let outcome = f
+                .router
+                .handle(&f.handle_client, &update_fixture(update_id, 777, text))
+                .await
+                .expect("handle");
+            assert_eq!(
+                outcome,
+                CommandOutcome::Unauthorized {
+                    sender_id: 777,
+                    command: expected.to_string(),
+                },
+                "{text} must stay behind the allowlist gate"
+            );
+            assert_eq!(
+                db::get_cursor(&f.pool).await.expect("cursor"),
+                update_id,
+                "the cursor advances past the rejected command"
+            );
+        }
+        assert!(
+            f.client.sent_texts().is_empty(),
+            "unauthorized /stats and /resend must send nothing"
+        );
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn stats_reports_today_last_week_and_all_time() {
+        let f = fixture().await;
+
+        let mut tx = f.pool.begin().await.expect("tx");
+        db::record_usage_tx(&mut tx, &db::local_date_utc8(), 2, 5, 100, 40)
+            .await
+            .expect("usage today");
+        db::record_usage_tx(&mut tx, &db::local_date_utc8_days_ago(3), 4, 8, 900, 300)
+            .await
+            .expect("usage earlier");
+        db::record_usage_tx(&mut tx, "2020-01-01", 1, 1, 10, 5)
+            .await
+            .expect("usage outside the week");
+        tx.commit().await.expect("commit");
+
+        let outcome = f
+            .router
+            .handle(&f.handle_client, &update_fixture(762, 42, "/stats"))
+            .await
+            .expect("handle");
+        let reply = reply_of(outcome);
+
+        assert!(reply.contains("Today"), "stats must show today: {reply}");
+        assert!(reply.contains("2 listings, 5 images, 100 prompt tok, 40 completion tok"));
+        assert!(reply.contains("Last 7 days"));
+        assert!(
+            reply.contains("6 listings, 13 images, 1000 prompt tok, 340 completion tok"),
+            "the 7-day window must sum today and 3 days ago: {reply}"
+        );
+        assert!(reply.contains("All-time"));
+        assert!(reply.contains("7 listings, 14 images, 1010 prompt tok, 345 completion tok"));
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn resend_without_a_listing_replies_friendly_message() {
+        let f = fixture().await;
+
+        let outcome = f
+            .router
+            .handle(&f.handle_client, &update_fixture(763, 42, "/resend"))
+            .await
+            .expect("handle");
+
+        assert_eq!(
+            reply_of(outcome),
+            "No previous listing available to resend.".to_string()
+        );
+        assert!(f.client.sent_albums().is_empty());
+        assert_eq!(f.client.sent_texts().len(), 1, "only the reply itself");
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn resend_replays_the_album_and_three_bubbles() {
+        let data_dir = std::env::temp_dir().join(format!("propbotd-resend-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&data_dir).expect("mkdir data dir");
+        let mut config = test_app_config();
+        config.storage.data_dir = data_dir.display().to_string();
+        let f = fixture_with(config).await;
+
+        let now = db::now_ms();
+        sqlx::query(
+            "INSERT INTO listings
+                 (id, sender_id, source_chat_id, source_message_ids, status, title, price_rm,
+                  ad_copy, ingested_at, updated_at, media_ready_at, chat_id, anchor_message_id)
+             VALUES ('L1', 42, 42, '[10]', 'MEDIA_READY',
+                     'Double Storey Corner House For Sale in Bercham Ipoh', 680000.0,
+                     'Sample ad copy 🔥', ?, ?, ?, 42, 10)",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&f.pool)
+        .await
+        .expect("seed listing");
+
+        let watermarked = data_dir.join("media").join("L1").join("watermarked");
+        std::fs::create_dir_all(&watermarked).expect("mkdir watermarked");
+        for name in ["01.jpg", "02.jpg"] {
+            std::fs::write(watermarked.join(name), b"jpeg").expect("write photo");
+        }
+
+        let outcome = f
+            .router
+            .handle(&f.handle_client, &update_fixture(764, 42, "/resend"))
+            .await
+            .expect("handle");
+        assert_eq!(reply_of(outcome), "Resent your latest listing.".to_string());
+
+        let albums = f.client.sent_albums();
+        assert_eq!(albums.len(), 1, "exactly one album");
+        assert_eq!(albums[0].0, 42);
+        assert_eq!(
+            albums[0].1,
+            vec![watermarked.join("01.jpg"), watermarked.join("02.jpg")]
+        );
+        assert_eq!(albums[0].2, "", "album caption must be empty");
+
+        let texts = f.client.sent_texts();
+        assert_eq!(
+            &texts[..3],
+            &[
+                "Double Storey Corner House For Sale in Bercham Ipoh".to_string(),
+                "RM 680,000".to_string(),
+                "Sample ad copy 🔥".to_string(),
+            ],
+            "resend must replay title, price and ad copy in order"
+        );
+        assert_eq!(
+            texts.last().map(String::as_str),
+            Some("Resent your latest listing.")
+        );
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }

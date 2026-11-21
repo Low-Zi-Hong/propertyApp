@@ -51,6 +51,12 @@ pub struct EnrichmentOutput {
     pub ad_copy: Option<String>,
     #[serde(default)]
     pub layout_variation: Option<i64>,
+    /// Token usage from the chat-completions `usage` envelope (Section 29.2).
+    /// Not part of the model JSON: filled by `parse_completion_body`.
+    #[serde(default)]
+    pub prompt_tokens: Option<i64>,
+    #[serde(default)]
+    pub completion_tokens: Option<i64>,
 }
 
 /// Object-safe LLM transport for enrichment.
@@ -128,10 +134,19 @@ pub fn parse_enrichment_json(content: &str) -> anyhow::Result<EnrichmentOutput> 
 }
 
 /// Parse a full chat-completions response body into the structured output.
+///
+/// The `usage` envelope is not part of the model JSON, so it is lifted from the
+/// raw response and attached to the output (Section 29.2). A missing envelope
+/// records `Some(0)`, keeping the accounting deterministic.
 pub fn parse_completion_body(raw: &[u8]) -> anyhow::Result<EnrichmentOutput> {
     let content = extract_content(raw)
         .ok_or_else(|| anyhow::anyhow!("deepseek response missing choices[0].message.content"))?;
-    parse_enrichment_json(&content)
+    let mut output = parse_enrichment_json(&content)?;
+    let envelope: serde_json::Value =
+        serde_json::from_slice(raw).unwrap_or(serde_json::Value::Null);
+    output.prompt_tokens = Some(envelope["usage"]["prompt_tokens"].as_i64().unwrap_or(0));
+    output.completion_tokens = Some(envelope["usage"]["completion_tokens"].as_i64().unwrap_or(0));
+    Ok(output)
 }
 
 fn extract_content(raw: &[u8]) -> Option<String> {
@@ -302,6 +317,8 @@ impl EnrichmentOutput {
             property_type: Some("House".to_string()),
             ad_copy: Some("Great condo 🔥".to_string()),
             layout_variation: Some(0),
+            prompt_tokens: Some(120),
+            completion_tokens: Some(80),
         }
     }
 }
@@ -393,6 +410,22 @@ mod tests {
         let body = r#"{"choices":[{"message":{"role":"assistant","content":"{\"title\":\"X\",\"price_rm\":1}"}}]}"#;
         let out = parse_completion_body(body.as_bytes()).expect("body");
         assert_eq!(out.title.as_deref(), Some("X"));
+        assert_eq!(
+            (out.prompt_tokens, out.completion_tokens),
+            (Some(0), Some(0)),
+            "a missing usage envelope records zeros"
+        );
+    }
+
+    #[test]
+    fn parse_completion_body_captures_usage_envelope() {
+        let body = r#"{
+            "choices": [{"message": {"role": "assistant", "content": "{\"title\":\"Y\"}"}}],
+            "usage": {"prompt_tokens": 321, "completion_tokens": 123, "total_tokens": 444}
+        }"#;
+        let out = parse_completion_body(body.as_bytes()).expect("body");
+        assert_eq!(out.prompt_tokens, Some(321));
+        assert_eq!(out.completion_tokens, Some(123));
     }
 
     #[tokio::test]

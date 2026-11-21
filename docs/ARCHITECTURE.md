@@ -1534,3 +1534,96 @@ endpoint and exit WITHOUT restarting; on success (or SkipBuild) Start-Process th
 4. Startup/shutdown notifications fire only when `devops.admin_chat_id` is set.
 5. `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` all pass.
    (Subprocess spawning and the PowerShell script are integration-level, not unit-tested.)
+
+---
+
+## 29. Milestone 9 - daily usage, storage cleanup, /resend (build contract)
+
+**Scope:** usage telemetry (daily_usage + /stats), aggressive media retention (keep only the
+latest job per chat), and a /resend command. State machine unchanged; `daily_usage` is never
+touched by GC/cleanup.
+
+### 29.1 daily_usage (migrations/0005_usage.sql + src/db.rs)
+
+Migration `0005_usage.sql`:
+- `ALTER TABLE listings ADD COLUMN prompt_tokens INTEGER;`
+- `ALTER TABLE listings ADD COLUMN completion_tokens INTEGER;`
+- `CREATE TABLE IF NOT EXISTS daily_usage (date TEXT PRIMARY KEY, listings_count INTEGER NOT
+  NULL DEFAULT 0, images_processed INTEGER NOT NULL DEFAULT 0, prompt_tokens INTEGER NOT NULL
+  DEFAULT 0, completion_tokens INTEGER NOT NULL DEFAULT 0);`
+
+`src/db.rs`:
+- `pub fn local_date_utc8() -> String` - today's `YYYY-MM-DD` in Asia/Kuala_Lumpur (chrono-tz).
+- `pub struct UsageRow { date, listings_count: i64, images_processed: i64, prompt_tokens: i64,
+  completion_tokens: i64 }` (+ sqlx FromRow).
+- `pub async fn record_usage_tx(tx, date, listings, images, prompt, completion)` - UPSERT with
+  `ON CONFLICT(date) DO UPDATE SET x = x + excluded.x` (atomic accumulate).
+- `pub async fn usage_today(pool) -> UsageRow`, `pub async fn usage_since(pool, date) -> UsageRow`
+  (SUM over date >= given), `pub async fn usage_all(pool) -> UsageRow`.
+
+### 29.2 Token capture (src/pipeline/enrich.rs)
+
+- `EnrichmentOutput` gains `#[serde(default)] prompt_tokens: Option<i64>` and
+  `completion_tokens: Option<i64>`. These are NOT in the model JSON; `parse_completion_body`
+  sets them from the chat-completions `usage` envelope (`usage.prompt_tokens`,
+  `usage.completion_tokens`, default 0). Update `FakeEnrichmentClient`/`sample()` accordingly.
+
+### 29.3 daily_usage recording (src/pipeline/worker.rs)
+
+- `apply_enriched` writes `prompt_tokens` + `completion_tokens` to `listings`.
+- Both `process_media` and `finalize_media_ready`, inside the SAME transaction as the guarded
+  `ENRICHED -> MEDIA_READY` UPDATE (wrap finalize's UPDATE in a tx too), read the row's
+  token columns and call `db::record_usage_tx(..., listings=1, images=survivor_count (0 for
+  finalize), prompt=prompt_tokens, completion=completion_tokens)` with `local_date_utc8()`.
+
+### 29.4 /stats + /status (src/telegram/router.rs)
+
+- `Command::Stats` (normal command, gated by the existing `authorized()` allowlist/admin).
+  Reply shows today, last-7-days (SUM over the 7 UTC+8 dates ending today) and all-time counts.
+- `/status` gains a `Today: N listings, M images` line (from `usage_today`).
+
+### 29.5 Storage cleanup (src/config.rs, src/gc/mod.rs, src/pipeline/worker.rs)
+
+- `StorageConfig` gains `max_media_age_hours: u32` (default 24) and
+  `keep_latest_job_media: bool` (default true) with serde defaults; document in both TOMLs.
+- New `pub async fn purge_stale_media(pool, app) -> anyhow::Result<Vec<String>>` in `gc`:
+  - cutoff = now - max_media_age_hours*3600*1000.
+  - resendable = listings with status in (MEDIA_READY, PUBLISHED). Per chat (group by
+    COALESCE(chat_id, source_chat_id)) pick the latest (MAX by COALESCE(media_ready_at,
+    published_at), tie-break id) as the kept id.
+  - purge candidates = status = PUBLISHED AND (media_ready_at OR published_at) older than
+    cutoff, excluding the kept ids when keep_latest_job_media is true.
+  - delete `<data_dir>/media/<id>/` for each candidate (dry-run aware, NotFound ignored), write
+    a GC_PURGE audit row, return purged ids. NEVER touch daily_usage.
+- `GcWorker::run_once` now calls `purge_stale_media` (replacing the old retention_days
+  PUBLISHED purge) and still prunes rolled logs.
+- Lightweight post-job cleanup: after the MEDIA_READY transition in `process_media` /
+  `finalize_media_ready`, best-effort `tokio::spawn` a `purge_stale_media` call (warn on error).
+
+### 29.6 /resend (src/telegram/router.rs + shared preview helper)
+
+- Extract the preview send into a shared helper (e.g. `src/telegram/preview.rs`):
+  `pub fn watermarked_photos(media_root, listing_id) -> Vec<PathBuf>` (sorted `watermarked/*.jpg`),
+  `pub fn format_price_rm(f64) -> String` (moved here), and
+  `pub async fn send_listing_preview(client, pool, listing_id, watermarked) -> Result<bool>`
+  (album with empty caption + title/price/description plain bubbles, returns whether anything
+  was sent). `PipelineWorker::send_review_preview` becomes a thin wrapper over it.
+- `db::latest_resendable(pool, sender_id) -> Option<listing id>`: status in (MEDIA_READY,
+  PUBLISHED) AND sender_id = ? ORDER BY COALESCE(media_ready_at, published_at) DESC, id DESC
+  LIMIT 1.
+- `Command::Resend` (normal, authorized()): find the sender's latest resendable listing; if
+  none OR its `watermarked/` dir has no files -> reply a friendly
+  `"No previous listing available to resend."`; else send the album + 3 bubbles and reply a
+  short confirmation.
+
+### 29.7 Acceptance criteria
+
+1. `daily_usage` accumulates atomically per UTC+8 date across days (unit-tested via
+   `record_usage_tx` + a worker test crossing two dates); token usage comes from the DeepSeek
+   `usage` envelope.
+2. GC keeps only the single latest job's media per chat (when `keep_latest_job_media`), purges
+   older completed jobs, respects `max_media_age_hours`, and never deletes `daily_usage` rows.
+3. `/stats` (allowlist/admin) shows today + last-7-days + all-time; `/status` includes today's
+   counts; `/resend` re-sends album + 3 bubbles for the found case and a friendly message for
+   the missing/purged case.
+4. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` all pass.

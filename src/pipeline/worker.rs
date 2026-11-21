@@ -340,9 +340,27 @@ impl PipelineWorker {
             debug!(listing_id, "media write skipped: no longer ENRICHED");
             return Ok(());
         }
+
+        // Usage telemetry rides in the same transaction as the transition, so a
+        // rollback can never mis-bill the day (Section 29.3).
+        let (prompt_tokens, completion_tokens): (Option<i64>, Option<i64>) =
+            sqlx::query_as("SELECT prompt_tokens, completion_tokens FROM listings WHERE id = ?")
+                .bind(listing_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        db::record_usage_tx(
+            &mut tx,
+            &db::local_date_utc8(),
+            1,
+            outcome.survivors.len() as i64,
+            prompt_tokens.unwrap_or(0),
+            completion_tokens.unwrap_or(0),
+        )
+        .await?;
         tx.commit().await?;
 
         info!(listing_id, photos = outcome.survivors.len(), "media ready");
+        self.spawn_stale_media_cleanup();
         self.reactions.update(listing_id, "MEDIA_READY").await;
         self.bus.publish(DaemonEvent::MediaReady {
             listing_id: listing_id.to_string(),
@@ -365,6 +383,7 @@ impl PipelineWorker {
         let now = db::now_ms();
         let watermark_text = effective_watermark_text(&app);
 
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE listings
              SET status = 'MEDIA_READY', cover_asset_id = ?, watermark_text = ?,
@@ -376,14 +395,34 @@ impl PipelineWorker {
         .bind(now)
         .bind(now)
         .bind(listing_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() == 0 {
+            tx.rollback().await?;
             debug!(listing_id, "media-ready write skipped: no longer ENRICHED");
             return Ok(());
         }
 
+        // Second `ENRICHED -> MEDIA_READY` path: no images were processed, but
+        // the listing still counts towards the day (Section 29.3).
+        let (prompt_tokens, completion_tokens): (Option<i64>, Option<i64>) =
+            sqlx::query_as("SELECT prompt_tokens, completion_tokens FROM listings WHERE id = ?")
+                .bind(listing_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        db::record_usage_tx(
+            &mut tx,
+            &db::local_date_utc8(),
+            1,
+            0,
+            prompt_tokens.unwrap_or(0),
+            completion_tokens.unwrap_or(0),
+        )
+        .await?;
+        tx.commit().await?;
+
         info!(listing_id, "media ready without watermarked photos");
+        self.spawn_stale_media_cleanup();
         self.reactions.update(listing_id, "MEDIA_READY").await;
         self.bus.publish(DaemonEvent::MediaReady {
             listing_id: listing_id.to_string(),
@@ -395,49 +434,35 @@ impl PipelineWorker {
     /// Best-effort Telegram review preview (Section 26.7 Revision 1): the
     /// watermarked album with an empty caption, then exactly three raw
     /// (unescaped) messages in strict order: title, price, ad copy.
+    ///
+    /// The send itself lives in [`crate::telegram::preview`] so `/resend` shares
+    /// the exact same output (Section 29.6).
     async fn send_review_preview(&self, listing_id: &str, watermarked: &[PathBuf]) {
-        type PreviewRow = (Option<i64>, Option<String>, Option<f64>, Option<String>);
-        let row: Option<PreviewRow> = sqlx::query_as(
-            "SELECT chat_id, title, price_rm, ad_copy
-             FROM listings WHERE id = ?",
+        if let Err(err) = crate::telegram::preview::send_listing_preview(
+            &self.client,
+            &self.pool,
+            listing_id,
+            watermarked,
         )
-        .bind(listing_id)
-        .fetch_optional(&self.pool)
         .await
-        .unwrap_or(None);
-        let Some((Some(chat_id), title, price_rm, ad_copy)) = row else {
-            return;
-        };
+        {
+            warn!(listing_id, error = %err, "cannot send media-ready review preview");
+        }
+    }
 
-        if !watermarked.is_empty() {
-            if let Err(err) = self.client.send_photo_album(chat_id, watermarked, "").await {
-                warn!(
-                    listing_id,
-                    chat_id,
-                    error = %err,
-                    "cannot send media-ready review album"
-                );
+    /// Fire-and-forget retention pass after a job completes (Section 29.5).
+    ///
+    /// `purge_stale_media` never touches the DB rows, so a failure only costs a
+    /// log line; the scheduled GC pass will try again.
+    fn spawn_stale_media_cleanup(&self) {
+        let pool = self.pool.clone();
+        let config = Arc::clone(&self.config);
+        tokio::spawn(async move {
+            let app = config.app();
+            if let Err(err) = crate::gc::purge_stale_media(&pool, &app).await {
+                warn!(error = %err, "post-job media cleanup failed");
             }
-        }
-
-        let field = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
-        let mut texts: Vec<String> = Vec::new();
-        texts.extend(field(title));
-        if let Some(price) = price_rm {
-            texts.push(format_price_rm(price));
-        }
-        texts.extend(field(ad_copy));
-
-        for text in texts {
-            if let Err(err) = self.client.send_plain_text(chat_id, &text).await {
-                warn!(
-                    listing_id,
-                    chat_id,
-                    error = %err,
-                    "cannot send media-ready review message"
-                );
-            }
-        }
+        });
     }
 
     /// Re-download `media_assets` rows with `local_path IS NULL`.
@@ -524,7 +549,8 @@ impl PipelineWorker {
                  title = ?, price_rm = ?, category = ?, location = ?, tenure = ?,
                  built_up_area = ?, land_area = ?, furnishing = ?,
                  bedrooms = ?, bathrooms = ?, property_type = ?, condition = ?,
-                 ad_copy = ?, layout_variation = ?, enriched_at = ?, updated_at = ?
+                 ad_copy = ?, layout_variation = ?, prompt_tokens = ?, completion_tokens = ?,
+                 enriched_at = ?, updated_at = ?
              WHERE id = ? AND status = 'INGESTED'",
         )
         .bind(title.as_deref())
@@ -541,6 +567,8 @@ impl PipelineWorker {
         .bind(output.condition.as_deref())
         .bind(output.ad_copy.as_deref())
         .bind(output.layout_variation)
+        .bind(output.prompt_tokens)
+        .bind(output.completion_tokens)
         .bind(now)
         .bind(now)
         .bind(listing_id)
@@ -656,30 +684,6 @@ fn missing_fields(output: &EnrichmentOutput) -> Vec<&'static str> {
     missing
 }
 
-/// Render a price as raw copy text with thousands separators (Section 26.4):
-/// `"RM "` + grouped integer, no decimals when whole, else two decimals.
-fn format_price_rm(price: f64) -> String {
-    let text = format!("{price:.2}");
-    let (integer, fraction) = text.split_once('.').unwrap_or((text.as_str(), "00"));
-    let (sign, integer) = match integer.strip_prefix('-') {
-        Some(rest) => ("-", rest),
-        None => ("", integer),
-    };
-    let digits: Vec<char> = integer.chars().filter(char::is_ascii_digit).collect();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.iter().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(*digit);
-    }
-    if fraction == "00" {
-        format!("RM {sign}{grouped}")
-    } else {
-        format!("RM {sign}{grouped}.{fraction}")
-    }
-}
-
 fn intervention_reply(missing: &[&str]) -> String {
     let fields = missing
         .iter()
@@ -703,6 +707,7 @@ mod tests {
     use crate::pipeline::enrich::{EnrichmentOutput, FakeEnrichmentClient};
     use crate::telegram::client::testing::FakeTelegramClient;
     use crate::telegram::download::MediaDownloader;
+    use crate::telegram::preview::format_price_rm;
 
     struct Fixture {
         worker: PipelineWorker,
@@ -1224,6 +1229,40 @@ mod tests {
                 .any(|(_, _, emoji)| emoji == "👌"),
             "MEDIA_READY reaction expected"
         );
+
+        db::test_support::cleanup(f.pool, f.dir).await;
+    }
+
+    #[tokio::test]
+    async fn media_ready_records_daily_usage_with_tokens() {
+        let f = fixture().await;
+        seed_ingested(&f.pool, "L1", "condo Cheras RM 500000", -10_000).await;
+        seed_photos(&f.pool, &f.dir, "L1", 2).await;
+
+        f.worker.process_one("L1").await.expect("process");
+
+        let (date, listings, images, prompt, completion): (String, i64, i64, i64, i64) =
+            sqlx::query_as(
+                "SELECT date, listings_count, images_processed, prompt_tokens, completion_tokens
+             FROM daily_usage",
+            )
+            .fetch_one(&f.pool)
+            .await
+            .expect("usage row");
+
+        assert_eq!(date, db::local_date_utc8());
+        assert_eq!(listings, 1, "one listing counted at MEDIA_READY");
+        assert_eq!(images, 2, "two surviving watermarked photos");
+        assert_eq!(prompt, 120, "sample() prompt token count");
+        assert_eq!(completion, 80, "sample() completion token count");
+
+        // The listing row keeps the same token figures for auditing.
+        let (row_prompt, row_completion): (Option<i64>, Option<i64>) =
+            sqlx::query_as("SELECT prompt_tokens, completion_tokens FROM listings WHERE id = 'L1'")
+                .fetch_one(&f.pool)
+                .await
+                .expect("listing tokens");
+        assert_eq!((row_prompt, row_completion), (Some(120), Some(80)));
 
         db::test_support::cleanup(f.pool, f.dir).await;
     }

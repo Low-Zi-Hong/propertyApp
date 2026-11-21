@@ -4,6 +4,7 @@
 pub mod client;
 pub mod download;
 pub mod ingest;
+pub mod preview;
 pub mod reactions;
 pub mod router;
 

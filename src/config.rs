@@ -100,11 +100,37 @@ pub struct AppConfig {
     pub devops: DevOpsConfig,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
     pub data_dir: String,
     pub db_file: String,
+    /// Media directories older than this are purged by the GC (Section 29.5).
+    #[serde(default = "default_max_media_age_hours")]
+    pub max_media_age_hours: u32,
+    /// Keep the newest completed job's media per chat so `/resend` can still
+    /// replay it (Section 29.5).
+    #[serde(default = "default_keep_latest_job_media")]
+    pub keep_latest_job_media: bool,
+}
+
+fn default_max_media_age_hours() -> u32 {
+    24
+}
+
+fn default_keep_latest_job_media() -> bool {
+    true
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: String::new(),
+            db_file: String::new(),
+            max_media_age_hours: default_max_media_age_hours(),
+            keep_latest_job_media: default_keep_latest_job_media(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -590,6 +616,12 @@ impl AppConfig {
         }
         if self.storage.db_file.trim().is_empty() {
             return Err(ConfigError::Missing("storage.db_file"));
+        }
+        if self.storage.max_media_age_hours == 0 {
+            return Err(ConfigError::invalid(
+                "storage.max_media_age_hours",
+                "must be >= 1",
+            ));
         }
         if self.ai.base_url.trim().is_empty() {
             return Err(ConfigError::Missing("ai.base_url"));
@@ -1263,6 +1295,11 @@ mod tests {
 
         assert_eq!(config.storage.data_dir, "data");
         assert_eq!(config.storage.db_file, "propbot.db");
+        assert_eq!(config.storage.max_media_age_hours, 24);
+        assert!(
+            config.storage.keep_latest_job_media,
+            "the newest job's media per chat is kept by default for /resend"
+        );
         assert_eq!(config.telegram.poll_timeout_secs, 30);
         assert_eq!(config.telegram.media_group_window_secs, 5);
         assert!(config.telegram.allowed_sender_ids.is_empty());

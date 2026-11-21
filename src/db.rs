@@ -27,6 +27,24 @@ pub fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
+/// Today's `YYYY-MM-DD` in Asia/Kuala_Lumpur (Section 29.1).
+///
+/// Every usage bucket is keyed by the local UTC+8 date, so a listing processed
+/// just before local midnight lands on the day the owner expects.
+pub fn local_date_utc8() -> String {
+    Utc::now()
+        .with_timezone(&chrono_tz::Asia::Kuala_Lumpur)
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+/// `YYYY-MM-DD` in Asia/Kuala_Lumpur, `days` days before today.
+pub fn local_date_utc8_days_ago(days: i64) -> String {
+    (Utc::now().with_timezone(&chrono_tz::Asia::Kuala_Lumpur) - chrono::Duration::days(days))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
 /// Open the pool with the Section 6 pragmas applied to every connection.
 pub async fn init_pool(db_path: &Path) -> anyhow::Result<SqlitePool> {
     if let Some(parent) = db_path.parent() {
@@ -283,6 +301,23 @@ pub async fn complete_listing(
     Ok(Some(id))
 }
 
+/// `/resend` (Section 29.6): the sender's newest listing whose preview can be
+/// re-sent (`MEDIA_READY` or `PUBLISHED`), by completion time.
+pub async fn latest_resendable(
+    pool: &SqlitePool,
+    sender_id: i64,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT id FROM listings
+         WHERE sender_id = ? AND status IN ('MEDIA_READY', 'PUBLISHED')
+         ORDER BY COALESCE(media_ready_at, published_at, 0) DESC, id DESC
+         LIMIT 1",
+    )
+    .bind(sender_id)
+    .fetch_optional(pool)
+    .await
+}
+
 // --- daemon_state ----------------------------------------------------------
 
 pub async fn get_state(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
@@ -436,6 +471,93 @@ pub async fn publish_success_counts(
     Ok((hourly, daily))
 }
 
+// --- usage (daily_usage) ---------------------------------------------------
+
+/// One usage bucket. `date` is `Option` so the aggregate queries still decode a
+/// row when the table is empty (`MAX(date)` is NULL, sums are 0).
+#[derive(Debug, Clone, Default, PartialEq, Eq, sqlx::FromRow)]
+pub struct UsageRow {
+    pub date: Option<String>,
+    pub listings_count: i64,
+    pub images_processed: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+}
+
+/// Atomically accumulate one day's usage inside the caller's transaction
+/// (Section 29.1). Two concurrent commits for the same date both land.
+pub async fn record_usage_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    date: &str,
+    listings: i64,
+    images: i64,
+    prompt: i64,
+    completion: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO daily_usage
+             (date, listings_count, images_processed, prompt_tokens, completion_tokens)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(date) DO UPDATE SET
+             listings_count    = listings_count + excluded.listings_count,
+             images_processed  = images_processed + excluded.images_processed,
+             prompt_tokens     = prompt_tokens + excluded.prompt_tokens,
+             completion_tokens = completion_tokens + excluded.completion_tokens",
+    )
+    .bind(date)
+    .bind(listings)
+    .bind(images)
+    .bind(prompt)
+    .bind(completion)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Today's (UTC+8) usage row; all zeros when nothing has been recorded yet.
+pub async fn usage_today(pool: &SqlitePool) -> Result<UsageRow, sqlx::Error> {
+    sqlx::query_as::<_, UsageRow>(
+        "SELECT MAX(date)                  AS date,
+                COALESCE(SUM(listings_count), 0)    AS listings_count,
+                COALESCE(SUM(images_processed), 0)  AS images_processed,
+                COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+         FROM daily_usage WHERE date = ?",
+    )
+    .bind(local_date_utc8())
+    .fetch_one(pool)
+    .await
+}
+
+/// Aggregated usage since `since_date` (inclusive), `YYYY-MM-DD`.
+pub async fn usage_since(pool: &SqlitePool, since_date: &str) -> Result<UsageRow, sqlx::Error> {
+    sqlx::query_as::<_, UsageRow>(
+        "SELECT MAX(date)                  AS date,
+                COALESCE(SUM(listings_count), 0)    AS listings_count,
+                COALESCE(SUM(images_processed), 0)  AS images_processed,
+                COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+         FROM daily_usage WHERE date >= ?",
+    )
+    .bind(since_date)
+    .fetch_one(pool)
+    .await
+}
+
+/// All-time usage, summed over every recorded date.
+pub async fn usage_all(pool: &SqlitePool) -> Result<UsageRow, sqlx::Error> {
+    sqlx::query_as::<_, UsageRow>(
+        "SELECT MAX(date)                  AS date,
+                COALESCE(SUM(listings_count), 0)    AS listings_count,
+                COALESCE(SUM(images_processed), 0)  AS images_processed,
+                COALESCE(SUM(prompt_tokens), 0)     AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+         FROM daily_usage",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 // --- audit -----------------------------------------------------------------
 
 /// Write an audit row inside the caller's transaction.
@@ -547,6 +669,7 @@ mod tests {
             "publish_attempts",
             "supervisor_events",
             "daemon_state",
+            "daily_usage",
         ] {
             assert!(tables.contains(&expected.to_string()), "missing {expected}");
         }
@@ -562,7 +685,7 @@ mod tests {
         let (pool, dir) = test_pool().await;
         run_migrations(&pool).await.expect("second run is a no-op");
         run_migrations(&pool).await.expect("third run is a no-op");
-        assert_eq!(table_names(&pool).await.len(), 6);
+        assert_eq!(table_names(&pool).await.len(), 7);
         cleanup(pool, dir).await;
     }
 
@@ -730,6 +853,120 @@ mod tests {
             .expect("counts");
         assert_eq!(hourly, 2);
         assert_eq!(daily, 2);
+
+        cleanup(pool, dir).await;
+    }
+
+    #[test]
+    fn local_date_utc8_is_a_valid_iso_date() {
+        let today = local_date_utc8();
+        assert_eq!(today.len(), 10, "YYYY-MM-DD expected: {today}");
+        chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").expect("valid date");
+
+        let week_ago = local_date_utc8_days_ago(6);
+        chrono::NaiveDate::parse_from_str(&week_ago, "%Y-%m-%d").expect("valid date");
+        assert!(week_ago < today, "6 days ago must precede today");
+    }
+
+    #[tokio::test]
+    async fn usage_accumulates_per_date_and_aggregates_correctly() {
+        let (pool, dir) = test_pool().await;
+
+        // Empty table: all-zero row, not RowNotFound.
+        let empty = usage_today(&pool).await.expect("empty usage");
+        assert_eq!(empty, UsageRow::default());
+        assert_eq!(empty.date, None);
+
+        let mut tx = pool.begin().await.expect("tx");
+        record_usage_tx(&mut tx, "2026-01-01", 1, 3, 100, 50)
+            .await
+            .expect("first day");
+        tx.commit().await.expect("commit");
+
+        // A second call on the same date accumulates on top.
+        let mut tx = pool.begin().await.expect("tx");
+        record_usage_tx(&mut tx, "2026-01-01", 2, 4, 10, 5)
+            .await
+            .expect("same day again");
+        record_usage_tx(&mut tx, "2026-01-02", 5, 0, 1000, 200)
+            .await
+            .expect("second day");
+        tx.commit().await.expect("commit");
+
+        let day1 = usage_since(&pool, "2026-01-01").await.expect("since");
+        assert_eq!(day1.listings_count, 8);
+        assert_eq!(day1.images_processed, 7);
+        assert_eq!(day1.prompt_tokens, 1110);
+        assert_eq!(day1.completion_tokens, 255);
+
+        let day2 = usage_since(&pool, "2026-01-02").await.expect("since");
+        assert_eq!(day2.listings_count, 5);
+        assert_eq!(day2.images_processed, 0);
+        assert_eq!(day2.prompt_tokens, 1000);
+        assert_eq!(day2.completion_tokens, 200);
+
+        let all = usage_all(&pool).await.expect("all");
+        assert_eq!(all, day1);
+
+        // No row for the real today, so `usage_today` stays zeroed.
+        assert_eq!(
+            usage_today(&pool).await.expect("today"),
+            UsageRow::default()
+        );
+
+        // ...and inserting today's bucket is visible through `usage_today`.
+        let mut tx = pool.begin().await.expect("tx");
+        record_usage_tx(&mut tx, &local_date_utc8(), 3, 1, 7, 9)
+            .await
+            .expect("today");
+        tx.commit().await.expect("commit");
+        let today = usage_today(&pool).await.expect("today");
+        assert_eq!(today.listings_count, 3);
+        assert_eq!(today.images_processed, 1);
+        assert_eq!(today.prompt_tokens, 7);
+        assert_eq!(today.completion_tokens, 9);
+        let today_date = local_date_utc8();
+        assert_eq!(today.date.as_deref(), Some(today_date.as_str()));
+
+        cleanup(pool, dir).await;
+    }
+
+    #[tokio::test]
+    async fn latest_resendable_orders_by_completion_time() {
+        let (pool, dir) = test_pool().await;
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO listings
+                 (id, sender_id, source_chat_id, status, ingested_at, updated_at,
+                  media_ready_at, chat_id)
+             VALUES ('OLD', 5, 5, 'PUBLISHED', ?, ?, ?, 5),
+                    ('NEW', 5, 5, 'MEDIA_READY', ?, ?, ?, 5),
+                    ('OTHER', 6, 6, 'MEDIA_READY', ?, ?, ?, 6),
+                    ('PENDING', 5, 5, 'INGESTED', ?, ?, NULL, 5)",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(now - 60_000)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed listings");
+
+        assert_eq!(
+            latest_resendable(&pool, 5).await.expect("sender 5"),
+            Some("NEW".to_string())
+        );
+        assert_eq!(
+            latest_resendable(&pool, 42).await.expect("unknown sender"),
+            None
+        );
 
         cleanup(pool, dir).await;
     }

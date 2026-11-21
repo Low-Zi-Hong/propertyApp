@@ -4,6 +4,8 @@
 [storage]
 data_dir = "data"
 db_file  = "propbot.db"
+max_media_age_hours   = 24     # purge completed listings' media older than this (hours)
+keep_latest_job_media = true   # keep the newest completed job's media per chat for /resend
 
 [telegram]
 bot_token = ""                # env fallback: PROPBOT_BOT_TOKEN
